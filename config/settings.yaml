@@ -1,0 +1,66 @@
+system:
+  version: "4.0.1"
+  mode: "PAPER" # CHANGED FROM LIVE - Use PAPER mode for testing
+  log_level: "INFO"
+
+trading:
+  broker_type: "MT5" # Options: "MT5", "BINANCE", "BYBIT", "MOCK"
+  symbol: "XAUUSD" # Recommended: [BTCUSD, ETHUSD, SOLUSD, BNBUSD, XRPUSD, DOGEUSD, EURUSD, GBPUSD, USDJPY, XAUUSD, XAGUSD, USOIL]
+  timeframe: "M1" # CHANGED TO M1 FOR HFT/SCALPING
+  magic_number: 888888
+  max_slippage: 5
+
+risk:
+  global_risk_percent: 2.0
+  max_drawdown_percent: 10.0
+  initial_lot: 0.01
+  zone_recovery:
+    enabled: true
+    zone_pips: 10
+    tp_pips: 10
+    max_layers: 5
+
+ai_parameters:
+  # NexusBrain confidence threshold for signal filtering
+  nexus_confidence_threshold: 0.30
+  
+  # Spread filtering (in points, 10 points = 1 pip)
+  spread_max_points: 50  # Maximum 5.0 pips spread for entry
+  
+  # ATR-based dynamic parameter multipliers
+  atr_zone_multiplier: 0.4   # Reduced to 0.4 to keep Hedge 3 closer
+  atr_tp_multiplier: 0.8      # Increased to 0.8 to extend profit targets
+  
+  # Dynamic exit parameters (as percentage of equity)
+  breakeven_trigger_percent: 0.1   # Trigger breakeven guard at 0.1% equity
+  breakeven_floor_percent: 0.01    # Floor level at 0.01% equity  
+  trailing_trigger_percent: 0.2    # Trailing stop trigger at 0.2% equity
+  trailing_retention: 0.7          # Retain 70% of peak profit before exit
+  
+  # Minimum dynamic parameter floor (in points)
+  min_zone_floor_points: 50  # Minimum 5 pips zone width
+  min_tp_floor_points: 50    # Minimum 5 pips take profit
+
+  # bridge:
+  #   zmq_pub_port: 5555
+  #   zmq_pull_port: 5556
+  #   host: "127.0.0.1"
+  #   fix_config: "config/fix_config.cfg"
+
+database:
+  use_timescale: true
+  type: "timescaledb" # Options: "sqlite", "timescaledb"
+  timescaledb:
+    host: "${DB_HOST}"
+    port: 5432
+    user: "${DB_USER}"
+    password: "${DB_PASSWORD}"
+    dbname: "${DB_NAME}"
+  sqlite:
+    path: "data/market_memory.db"
+
+dashboard:
+  port: 8002
+  ngrok_enabled: false
+  ngrok_auth_token: "${NGROK_AUTH_TOKEN}"
+

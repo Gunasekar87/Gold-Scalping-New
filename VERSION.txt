@@ -1,0 +1,12 @@
+﻿v4.3.1 (CRITICAL FIXES) - 2025-12-10
+- [FIX] PositionManager: Added missing `calculate_net_pnl` method causing exit failures.
+- [FIX] PositionManager: Fixed `IndentationError` and missing `asyncio` import.
+- [FIX] TradingEngine: Fixed `AttributeError` (get_tick -> get_tick_data).
+- [FIX] Dependencies: Added `psutil` for high-priority process scheduling.
+
+v4.3.0
+- Feature: Stalemate Breaker (Time-Decay for Deep Hedges)
+- Feature: True Net PnL Logic (Profit + Swap + Commission)
+- Feature: Aggressive Closer (Parallel Execution + Slippage Tolerance + Retries)
+- Feature: Transparent PnL Logging
+- Cleanup: Removed deprecated sequential closing logic

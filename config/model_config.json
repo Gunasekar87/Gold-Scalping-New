@@ -1,0 +1,13 @@
+{
+  "models": {
+    "alpha_seer": {
+      "path": "models/chronos_bolt_small_int8.onnx",
+      "input_shape": [1, 64],
+      "prediction_horizon": 10
+    },
+    "iron_shield": {
+      "path": "models/ppo_risk_agent.zip",
+      "type": "sb3_ppo"
+    }
+  }
+}

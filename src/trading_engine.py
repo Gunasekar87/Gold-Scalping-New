@@ -1,0 +1,1481 @@
+"""
+Trading Engine - Core trading logic and orchestration.
+
+This module provides the main trading engine including:
+- Trade entry and exit orchestration
+- AI decision integration
+- Market condition validation
+- Rate limiting and safety controls
+
+Author: AETHER Development Team
+License: MIT
+Version: 1.0.0
+"""
+
+import time
+import logging
+import asyncio
+import math
+from typing import Dict, List, Optional, Any, Tuple
+from dataclasses import dataclass
+from enum import Enum
+
+# Import constants
+from .constants import ScalpingConfig, ZoneRecoveryConfig
+
+# Import async database components
+from .infrastructure.async_database import (
+    AsyncDatabaseManager, AsyncDatabaseQueue, TickData, CandleData, TradeData
+)
+from .utils.trading_logger import TradingLogger, DecisionTracker, format_pips
+
+logger = logging.getLogger("TradingEngine")
+# [CRITICAL] Get the specific UI logger that run_bot.py listens to
+ui_logger = logging.getLogger("AETHER_UI")
+
+
+class TradeAction(Enum):
+    """Enumeration of possible trade actions."""
+    BUY = "BUY"
+    SELL = "SELL"
+    HOLD = "HOLD"
+
+
+@dataclass
+class TradeSignal:
+    """Represents a trading signal with metadata."""
+    action: TradeAction
+    symbol: str
+    confidence: float
+    reason: str
+    metadata: Dict[str, Any]
+    timestamp: float
+
+    def __post_init__(self):
+        if self.timestamp == 0:
+            self.timestamp = time.time()
+
+
+@dataclass
+class TradingConfig:
+    """Configuration for trading parameters."""
+    symbol: str
+    initial_lot: float
+    max_lot: float = 100.0
+    min_lot: float = 0.01
+    global_trade_cooldown: float = 15.0  # seconds
+    max_spread_pips: float = 30.0
+    risk_multiplier_range: Tuple[float, float] = (0.1, 2.0)
+    timeframe: str = "M1"
+
+
+class TradingEngine:
+    """
+    Core trading engine that orchestrates all trading activities.
+
+    This class handles:
+    - AI decision processing and validation
+    - Trade execution with safety checks
+    - Rate limiting and cooldown management
+    - Integration with all trading components
+    """
+
+    def __init__(self, config: TradingConfig, broker_adapter, market_data, position_manager, risk_manager, db_manager: Optional[AsyncDatabaseManager] = None, ppo_guardian=None, global_brain=None):
+        self.config = config
+        self.broker = broker_adapter
+        self.market_data = market_data
+        self.position_manager = position_manager
+        self.risk_manager = risk_manager
+        self.ppo_guardian = ppo_guardian
+        self.global_brain = global_brain # Layer 9: Inter-Market Correlation
+
+        # Async database components
+        self.db_manager = db_manager
+        self.db_queue: Optional[AsyncDatabaseQueue] = None
+
+        # Rate limiting
+        self.last_trade_time = 0.0
+        self.trade_cooldown_active = False
+        
+        # Status Tracking (For UI Feedback)
+        self.last_pause_reason = None
+
+        # Decision tracking for smart logging (only log changes)
+        self.decision_tracker = DecisionTracker()
+        self._last_signal_logged = False  # Track if we just logged a signal
+        self._last_position_status_time = 0.0  # Track last position status log time
+        self._last_cooldown_log_time = 0.0 # Track last cooldown log time
+
+        # Statistics
+        self.session_stats = {
+            "trades_opened": 0,
+            "trades_closed": 0,
+            "total_profit": 0.0,
+            "win_rate": 0.0,
+            "start_time": time.time()
+        }
+
+        logger.info(f"TradingEngine initialized for {config.symbol}")
+
+    async def initialize_database(self) -> None:
+        """Initialize async database components."""
+        if self.db_manager:
+            try:
+                await self.db_manager.connect()
+                await self.db_manager.initialize_schema()
+                self.db_queue = AsyncDatabaseQueue(self.db_manager)
+                await self.db_queue.start()
+                logger.info("Database components initialized")
+            except Exception as e:
+                logger.error(f"Database initialization failed: {e}")
+                self.db_manager = None
+
+    async def shutdown_database(self) -> None:
+        """Shutdown async database components."""
+        if self.db_queue:
+            await self.db_queue.stop()
+        if self.db_manager:
+            await self.db_manager.disconnect()
+
+    def validate_market_conditions(self, symbol: str, tick: Dict) -> Tuple[bool, str]:
+        """
+        Validate if market conditions are suitable for trading.
+
+        Args:
+            symbol: Trading symbol
+            tick: Current tick data
+
+        Returns:
+            Tuple of (is_valid, reason)
+        """
+        # Check basic market data validity
+        if not tick or 'bid' not in tick or 'ask' not in tick:
+            return False, "Invalid tick data"
+
+        # Check spread
+        # Adjust multiplier for JPY and XAU pairs
+        multiplier = 10000
+        if "JPY" in symbol or "XAU" in symbol:
+            multiplier = 100
+            
+        spread_pips = abs(tick['ask'] - tick['bid']) * multiplier
+        if spread_pips > self.config.max_spread_pips:
+            return False, f"Spread too wide: {spread_pips:.1f} pips"
+
+        # Check market data manager conditions
+        return self.market_data.validate_market_conditions(symbol, tick)
+
+    def generate_trade_signal(self, symbol: str, council, market_data: Dict, decision_tracker=None) -> Optional[TradeSignal]:
+        """
+        Generate a trade signal using the AI council.
+
+        Args:
+            symbol: Trading symbol
+            council: Council instance for decision making
+            market_data: Dictionary containing market data
+            decision_tracker: Optional DecisionTracker for change detection
+
+        Returns:
+            TradeSignal or None if no signal
+        """
+        try:
+            # Extract required data
+            history = market_data.get('history', [])
+            nexus_candles = market_data.get('nexus_candles', [])
+            full_candles = market_data.get('full_candles', [])
+            account_info = market_data.get('account_info', {})
+            macro_slope = market_data.get('macro_slope', 0.0)
+            sentiment_score = market_data.get('sentiment_score', 0.0)
+
+            if len(history) < 64:
+                return None
+
+            # Get council decision
+            decision, reason, metadata = council.deliberate(
+                symbol, history, nexus_candles, full_candles,
+                account_info.get('equity', 0),
+                account_info.get('balance', 0),
+                macro_slope, "NEUTRAL", sentiment_score  # quantum_signal placeholder
+            )
+
+            # === SIMPLIFIED AI DECISION LOGGING ===
+            # Only log actionable decisions (BUY/SELL) with minimal context
+            # HOLD decisions are silent to prevent log spam
+            
+            # Decision Validation
+            if decision not in ["BUY", "SELL", "HOLD"]:
+                logger.warning(f"[INVALID] Decision: {decision} | AI System Check Required")
+                return None
+
+            if decision == "HOLD":
+                # Silent HOLD - no log spam
+                # [DEBUG] Log HOLD reason to debug no-trade issue
+                if "Insufficient" not in reason: # Filter out data loading noise
+                     logger.info(f"[DEBUG] HOLD Reason: {reason}")
+                return None
+
+            # Signal Generation Intelligence
+            action = TradeAction.BUY if decision == "BUY" else TradeAction.SELL
+            confidence = metadata.get("nexus_confidence", 0.5)
+
+            # Only log signal if it changed from last decision (reduces repetitive logs)
+            should_log, change_reason = self.decision_tracker.should_log_decision(
+                symbol,
+                {'action': action.value, 'confidence': confidence, 'reasoning': reason}
+            )
+            self._last_signal_logged = should_log
+            if should_log:
+                logger.info(f"[SIGNAL] {action.value} {symbol} | Confidence: {confidence:.3f} | Reason: {reason}")
+
+            return TradeSignal(
+                action=action,
+                symbol=symbol,
+                confidence=confidence,
+                reason=reason,
+                metadata=metadata,
+                timestamp=time.time()
+            )
+
+        except Exception as e:
+            logger.error(f"Error generating trade signal: {e}")
+            return None
+
+    def calculate_position_size(self, signal: TradeSignal, account_info: Dict,
+                              strategist, shield, ppo_guardian=None, 
+                              atr_value=0.001, trend_strength=0.0) -> Tuple[float, str]:
+        """
+        Calculate appropriate position size for a trade signal with PPO optimization.
+
+        Args:
+            signal: Trade signal
+            account_info: Account information
+            strategist: Strategist instance
+            shield: IronShield instance
+            ppo_guardian: PPO Guardian instance for AI-driven sizing (optional)
+            atr_value: Current ATR for volatility assessment
+            trend_strength: Trend strength for PPO decision
+
+        Returns:
+            Tuple of (lot_size, reason)
+        """
+        try:
+            # Get base lot size from shield
+            raw_lot = shield.calculate_entry_lot(
+                account_info.get('equity', 1000),
+                confidence=signal.confidence,
+                atr_value=atr_value,
+                trend_strength=trend_strength
+            )
+
+            if raw_lot is None or raw_lot <= 0:
+                return 0.0, "Invalid base lot calculation"
+
+            # Apply strategist risk multiplier
+            risk_mult = strategist.get_risk_multiplier()
+            
+            # --- DYNAMIC LOT SIZING (Layer 8) ---
+            # Scale based on Account Balance & Confidence
+            # 1. Balance Scaling: 0.01 lots per $1000 equity (Conservative)
+            equity = account_info.get('equity', 1000)
+            balance_scale = max(1.0, equity / 1000.0)
+            
+            # 2. Confidence Scaling: 
+            # If Confidence > 0.8 -> 1.2x size
+            # If Confidence < 0.5 -> 0.8x size
+            conf_scale = 1.0
+            if signal.confidence > 0.8:
+                conf_scale = 1.2
+            elif signal.confidence < 0.5:
+                conf_scale = 0.8
+                
+            # 3. Trend Closing Confidence (Win Rate)
+            # If recent win rate is high (>60%), increase size slightly
+            # If recent win rate is low (<40%), decrease size
+            win_rate_scale = 1.0
+            if hasattr(strategist, 'recent_win_rate'):
+                 if strategist.recent_win_rate > 0.6:
+                     win_rate_scale = 1.1
+                 elif strategist.recent_win_rate < 0.4:
+                     win_rate_scale = 0.8
+
+            # Apply all scalings to raw_lot (which is usually fixed 0.01)
+            # If raw_lot is fixed 0.01, we scale it up.
+            # If raw_lot is already dynamic from Shield, we just refine it.
+            
+            # Let's assume raw_lot is the "Base Lot" from config (e.g. 0.01)
+            # New Lot = Base * BalanceScale * ConfScale * WinRateScale * RiskMult
+            
+            dynamic_lot = raw_lot * balance_scale * conf_scale * win_rate_scale * risk_mult
+            
+            # NEW: Apply PPO Guardian AI optimization
+            ppo_mult = 1.0  # Default if PPO not available
+            if ppo_guardian:
+                try:
+                    # Calculate pip multiplier for logging
+                    pip_multiplier = 100 if "XAU" in signal.symbol or "GOLD" in signal.symbol else 10000
+                    
+                    ppo_mult = ppo_guardian.get_position_size_multiplier(
+                        atr=atr_value,
+                        trend_strength=trend_strength,
+                        confidence=signal.confidence,
+                        current_equity=account_info.get('equity', 1000)
+                    )
+                    atr_pips = atr_value * pip_multiplier
+                    # Changed to DEBUG to prevent log spam
+                    logger.debug(f"[PPO_SIZING] Position Multiplier: {ppo_mult:.2f}x | ATR: {atr_pips:.1f}pips | Trend: {trend_strength:.2f} | Conf: {signal.confidence:.2f}")
+                except Exception as ppo_error:
+                    logger.warning(f"[PPO_SIZING] Failed: {ppo_error}, using 1.0x default")
+                    ppo_mult = 1.0
+            
+            # Calculate final lot size with ALL multipliers
+            # Use 4 decimals to allow for micro-lots (0.001) if broker supports it.
+            # MT5 Adapter will normalize to exact step (e.g. 0.01 or 0.001).
+            entry_lot = round(dynamic_lot * ppo_mult, 4)
+
+            # Validate lot size bounds
+            if entry_lot < self.config.min_lot:
+                # If calculated is too small but we have equity, default to min_lot
+                entry_lot = self.config.min_lot
+
+            if entry_lot > self.config.max_lot:
+                entry_lot = self.config.max_lot
+
+            reason_parts = [
+                f"Lot: {entry_lot}",
+                f"Base: {raw_lot:.2f}",
+                f"BalScale: {balance_scale:.1f}",
+                f"ConfScale: {conf_scale:.1f}",
+                f"WinScale: {win_rate_scale:.1f}"
+            ]
+            
+            if ppo_guardian and ppo_mult != 1.0:
+                reason_parts.append(f"ppo_mult: {ppo_mult:.2f}")
+            
+            return entry_lot, " | ".join(reason_parts)
+
+        except Exception as e:
+            logger.error(f"Error calculating position size: {e}")
+            return 0.0, f"Calculation error: {e}"
+
+    def validate_trade_entry(self, signal: TradeSignal, lot_size: float,
+                           account_info: Dict, tick: Dict, is_recovery_trade: bool = False) -> Tuple[bool, str]:
+        """
+        Perform final validation before executing a trade.
+
+        Args:
+            signal: Trade signal
+            lot_size: Calculated lot size
+            account_info: Account information
+            tick: Current tick data
+            is_recovery_trade: If True, bypass position direction check (for hedges/DCA/zone recovery)
+
+        Returns:
+            Tuple of (can_enter, reason)
+        """
+        # Check global trade cooldown
+        time_since_last_trade = time.time() - self.last_trade_time
+        if time_since_last_trade < self.config.global_trade_cooldown:
+            return False, f"Global cooldown: {time_since_last_trade:.1f}s < {self.config.global_trade_cooldown}s"
+
+        # Check account equity
+        equity = account_info.get('equity', 0)
+        if equity <= 0:
+            return False, "Invalid account equity"
+
+        # Check if algo trading is allowed
+        if not self.broker.is_trade_allowed():
+            return False, "Algo trading disabled"
+
+        # Check for recent bucket closes
+        symbol = signal.symbol
+        if self.position_manager.is_bucket_closed_recently(f"{symbol}_recent", 15.0):
+            return False, "Recent bucket close - cooldown active"
+
+        # CRITICAL: Prevent adding to existing positions in same direction
+        # (unless it's a recovery trade for hedging/DCA/zone recovery)
+        if not is_recovery_trade:
+            existing_positions = self.broker.get_positions(symbol)
+            if existing_positions:
+                # Check if any position is in the same direction as the signal
+                signal_direction = 0 if signal.action == TradeAction.BUY else 1  # 0=BUY, 1=SELL
+                for pos in existing_positions:
+                    # Position object has .type attribute (0=BUY, 1=SELL)
+                    if pos.type == signal_direction:
+                        return False, f"Position already exists in {signal.action.value} direction - awaiting TP/hedge trigger"
+
+        # --- HFT LAYER 7: ORDER BOOK IMBALANCE (OBI) FILTER ---
+        # If OBI is strongly against us, block the trade.
+        # OBI > 0.3 means Strong Buy Pressure. OBI < -0.3 means Strong Sell Pressure.
+        obi = tick.get('obi', 0.0)
+        if abs(obi) > 0.3: # Only filter if there is significant imbalance
+            if signal.action == TradeAction.BUY and obi < -0.3:
+                return False, f"HFT Block: Strong Sell Pressure (OBI: {obi:.2f})"
+            if signal.action == TradeAction.SELL and obi > 0.3:
+                return False, f"HFT Block: Strong Buy Pressure (OBI: {obi:.2f})"
+
+        return True, "Trade entry validated"
+
+    async def execute_trade_entry(self, signal: TradeSignal, lot_size: float,
+                          tick: Dict, strategist, shield) -> Optional[Dict]:
+        """
+        Execute a trade entry order.
+
+        Args:
+            signal: Trade signal
+            lot_size: Position size
+            tick: Current tick data
+            strategist: Strategist instance
+            shield: IronShield instance
+
+        Returns:
+            Order result dict or None if failed
+        """
+        try:
+            # Extract signal metadata for logging and logic
+            nexus_conf = signal.metadata.get('nexus_signal_confidence', 0.0)
+            trend_strength = signal.metadata.get('trend_strength', 0.0)
+            market_status = signal.metadata.get('market_status', 'Unknown')
+            caution_factor = signal.metadata.get('caution_factor', 1.0)
+            sentiment = signal.metadata.get('sentiment_score', 0.0)
+
+            # Determine entry price and order type
+            if signal.action == TradeAction.BUY:
+                entry_price = tick['ask']
+                order_type = "BUY"
+            else:
+                entry_price = tick['bid']
+                order_type = "SELL"
+
+            # Get dynamic TP parameters - USE ACTUAL ATR
+            symbol = signal.symbol
+            atr_value = self.market_data.calculate_atr(symbol, 14) if hasattr(self.market_data, 'calculate_atr') else 0.0010
+            
+            # Convert ATR to points based on symbol type
+            if 'JPY' in symbol or 'XAU' in symbol:
+                atr_points = atr_value * 100  # JPY and Gold pairs use 2 decimal places
+                pip_multiplier = 100
+            else:
+                atr_points = atr_value * 10000  # Major forex pairs use 4 decimal places
+                pip_multiplier = 10000
+                
+            zone_points, tp_points = shield.get_dynamic_params(atr_points)  # Convert to points
+            tp_pips_entry = tp_points # Define for logging compatibility
+
+            # Calculate broker-side TP price for instant execution
+            # Use Shield's dynamic TP (configurable via settings.yaml)
+            # NO SL - hedging strategy manages risk through zone recovery
+            
+            if order_type == "BUY":
+                tp_price_broker = entry_price + (tp_points / pip_multiplier)
+            else:  # SELL
+                tp_price_broker = entry_price - (tp_points / pip_multiplier)
+            
+            # Round to correct precision
+            digits = 2 if "JPY" in symbol or "XAU" in symbol else 5
+            tp_price_broker = round(tp_price_broker, digits)
+
+            # Execute order WITHOUT broker TP/SL for hedge strategy
+            # CRITICAL: No SL on broker because hedges ARE the risk management!
+            # Setting SL would close position before hedges trigger, defeating the strategy.
+            # Bucket logic (Python-side 100ms monitoring) manages ALL exits including break-even.
+            
+            # === EQUITY CHECK BEFORE EXECUTION ===
+            account_info = self.broker.get_account_info()
+            logger.debug(f"[ACCOUNT_INFO] Retrieved: {account_info}")
+            if not account_info:
+                logger.error("[ACCOUNT_INFO] Failed to retrieve account information")
+                return None
+            
+            if account_info.get('equity', 0) < 100:
+                logger.error(f"[TRADE] Insufficient equity: {account_info.get('equity', 0)} < 100")
+                return None
+            
+            # Estimate required margin
+            contract_size = 100 if "XAU" in signal.symbol else 100000
+            leverage = account_info.get('leverage', 100)
+            required_margin = lot_size * contract_size * entry_price / leverage
+            available_margin = account_info.get('margin_free', 0)
+            
+            if required_margin > available_margin:
+                logger.error(f"[TRADE] Insufficient margin: Required {required_margin:.2f} > Available {available_margin:.2f}")
+                return None
+            
+            result = self.broker.execute_order(
+                action="OPEN",
+                symbol=signal.symbol,
+                order_type=order_type,
+                price=entry_price,
+                volume=lot_size,
+                sl=0.0,  # NO SL - hedging strategy manages risk
+                tp=0.0,  # NO BROKER TP - Virtual TP managed by Python for nil latency
+                # MT5 comment limit: 31 chars
+                comment=f"{signal.reason[:20]}"
+            )
+            
+            # Log broker targets (actually set on broker for single positions)
+            if result and result.get('ticket'):
+                logger.info(f"[ORDER] VIRTUAL TP: {tp_price_broker:.5f} (Dynamic) | NO SL - Hedging Strategy")
+                logger.info(f"[ORDER] Risk Management: Virtual TP for instant exits | Hedges manage downside risk")
+
+            if result and result.get('ticket'):
+                # Update statistics
+                self.session_stats["trades_opened"] += 1
+
+                # Record trade in database
+                if self.db_queue:
+                    trade_data = TradeData(
+                        ticket=result['ticket'],
+                        symbol=signal.symbol,
+                        trade_type=order_type,
+                        volume=lot_size,
+                        open_price=entry_price,
+                        close_price=None,
+                        profit=None,
+                        open_time=time.time(),
+                        close_time=None,
+                        strategy_reason=signal.reason
+                    )
+                    await self.db_queue.add_trade(trade_data)
+
+                # Record learning data with entry TP/SL metadata
+                ticket = result['ticket']
+                self.position_manager.record_learning_trade(ticket, signal.symbol, {
+                    "symbol": signal.symbol,
+                    "type": order_type,
+                    "entry_price": entry_price,
+                    "obs": [0.0, tp_points, 0.0, signal.metadata.get("nexus_signal_confidence", 0.0)],
+                    "action": [1.0, 0.8],  # Default hedge mult and zone mod
+                    "open_time": time.time(),
+                    # Store entry targets for Python-side monitoring
+                    "entry_tp_pips": tp_pips_entry,
+                    "entry_sl_pips": 0.0,  # NO SL - hedging strategy only
+                    "entry_atr": atr_value
+                })
+
+                # === ENHANCED AI INTELLIGENCE TRADING PLAN LOGGING ===
+                # Comprehensive AI decision factors and execution intelligence
+                symbol = signal.symbol
+                atr_value = self.market_data.calculate_atr(symbol, 14) if hasattr(self.market_data, 'calculate_atr') else 0.0010
+                
+                # Convert ATR to pips based on symbol type
+                if "JPY" in symbol or "XAU" in symbol:
+                    atr_pips = atr_value * 100  # JPY and Gold pairs use 2 decimal places
+                else:
+                    atr_pips = atr_value * 10000  # Major forex pairs use 4 decimal places
+
+                # Risk intelligence calculations (AI-Adjusted)
+                # OPTIMIZED GAPS: Linear expansion to prevent tight whipsaws in Hedge 2
+                # Ask PPO for dynamic zone modifier to align Plan with Execution
+                zone_mod = 1.0
+                if self.ppo_guardian:
+                    try:
+                        # Use 0 drawdown for initial plan
+                        _, zone_mod = self.ppo_guardian.get_dynamic_zone(0.0, atr_value, trend_strength, nexus_conf)
+                    except Exception as e:
+                        logger.warning(f"[PPO] Failed to get dynamic zone: {e}")
+                        zone_mod = 1.0
+
+                # Define pip divisor based on symbol for correct price calculation
+                pip_divisor = 100 if "JPY" in symbol or "XAU" in symbol else 10000
+                point_approx = 1.0 / (pip_divisor * 10) # Approx point size for spread calc
+
+                tp_pips = atr_pips * ScalpingConfig.TP_ATR_MULTIPLIER  # 30% of ATR for tight scalping
+                tp_price_dist = tp_pips / pip_divisor
+                tp_price = entry_price + tp_price_dist if order_type == "BUY" else entry_price - tp_price_dist
+
+                # === UNIFIED ZONE RECOVERY PLAN ===
+                # Calculate Zone Width (Fixed for the sequence)
+                # Based on Hedge 1 distance (0.5 ATR)
+                zone_pips = atr_pips * ScalpingConfig.HEDGE1_ATR_MULTIPLIER * zone_mod
+                zone_price_dist = zone_pips / pip_divisor
+                
+                # Get Spread for Lot Calculation (Estimate)
+                current_tick = self.market_data.get_tick_data(symbol)
+                spread_points = 20 # Default 2 pips
+                if current_tick and 'ask' in current_tick and 'bid' in current_tick:
+                    spread_points = (current_tick['ask'] - current_tick['bid']) / point_approx
+                
+                # Calculate Lots using IronShield (Same as Execution)
+                # Convert pips to points for IronShield
+                zone_points = zone_pips * 10
+                tp_points = tp_pips * 10
+                
+                # === AI BOOST: FUTURISTIC PREDICTION ===
+                # If Oracle predicts a crash/rally, boost the hedge lots in that direction
+                # to capitalize on the move and exit faster.
+                ai_bias = 0.0
+                oracle_prediction = signal.metadata.get('oracle_prediction', 'NEUTRAL')
+                
+                # Determine H1 direction (Opposite to Entry)
+                h1_dir_check = "SELL" if order_type == "BUY" else "BUY"
+                
+                if h1_dir_check == "SELL" and oracle_prediction == "BEARISH":
+                    ai_bias = 0.10 # +10% Aggression on Sell Hedges
+                elif h1_dir_check == "BUY" and oracle_prediction == "BULLISH":
+                    ai_bias = 0.10 # +10% Aggression on Buy Hedges
+
+                # Calculate Hedge Lots Iteratively
+                # Hedge 1 (Opposite)
+                raw_h1 = self.risk_manager.shield.calculate_defense(
+                    lot_size, spread_points, fixed_zone_points=zone_points, fixed_tp_points=tp_points,
+                    oracle_prediction=oracle_prediction, hedge_level=1
+                )
+                hedge1_lot = round(raw_h1 * (1.0 + ai_bias), 4)
+                
+                # Hedge 2 (Recovery) - Recovers H1
+                hedge2_lot = self.risk_manager.shield.calculate_defense(
+                    hedge1_lot, spread_points, fixed_zone_points=zone_points, fixed_tp_points=tp_points,
+                    oracle_prediction=oracle_prediction, hedge_level=2
+                )
+                
+                # === SMART EXPANSION LOGIC ===
+                # Determine Expansion Factor based on AI Prediction
+                ai_expansion_factor = 0.3 # Default: Hedge 3 is 30% further out
+                
+                # Check Oracle Prediction (if available in metadata)
+                oracle_prediction = signal.metadata.get('oracle_prediction', 'NEUTRAL')
+                
+                # If we are Buying (H1 is Sell), and AI says Bullish (Reversal), delay the Sell Hedge 3
+                if order_type == "BUY" and oracle_prediction == "BULLISH":
+                    ai_expansion_factor = 0.6 # Push it 60% away (Give it room to breathe)
+                # If we are Selling (H1 is Buy), and AI says Bearish (Reversal), delay the Buy Hedge 3
+                elif order_type == "SELL" and oracle_prediction == "BEARISH":
+                    ai_expansion_factor = 0.6
+
+                # Calculate Smart Buffer
+                smart_buffer_pips = (zone_pips * ai_expansion_factor)
+                smart_buffer_dist = smart_buffer_pips / pip_divisor
+                
+                # Hedge 3 (Opposite) - Same direction as H1
+                # We boost the zone size for H3 calculation to account for the extra distance
+                # Effective Zone for H3 = Zone + Buffer
+                expanded_zone_points = zone_points * (1.0 + ai_expansion_factor)
+                
+                raw_h3 = self.risk_manager.shield.calculate_defense(
+                    hedge2_lot, spread_points, fixed_zone_points=expanded_zone_points, fixed_tp_points=tp_points,
+                    oracle_prediction=oracle_prediction, hedge_level=3
+                )
+                hedge3_lot = round(raw_h3 * (1.0 + ai_bias), 4)
+                
+                # Hedge 4 (Recovery) - Recovers H3
+                # H4 recovers H3 over the expanded zone distance
+                hedge4_lot = self.risk_manager.shield.calculate_defense(
+                    hedge3_lot, spread_points, fixed_zone_points=expanded_zone_points, fixed_tp_points=tp_points,
+                    oracle_prediction=oracle_prediction, hedge_level=4
+                )
+
+                # Calculate Hedge Prices (Smart Expansion Logic)
+                if order_type == "BUY":
+                    # Initial Buy
+                    # Hedge 1 (Sell): Entry - Zone
+                    hedge1_price = entry_price - zone_price_dist
+                    h1_dir = "SELL"
+                    
+                    # Hedge 2 (Buy): Entry (Recovery)
+                    hedge2_price = entry_price
+                    h2_dir = "BUY"
+                    
+                    # Hedge 3 (Sell): H1 - Smart Buffer (Expansion)
+                    hedge3_price = hedge1_price - smart_buffer_dist
+                    h3_dir = "SELL"
+                    
+                    # Hedge 4 (Buy): Matches H2 (Entry)
+                    hedge4_price = hedge2_price
+                    h4_dir = "BUY"
+                    
+                else: # SELL
+                    # Initial Sell
+                    # Hedge 1 (Buy): Entry + Zone
+                    hedge1_price = entry_price + zone_price_dist
+                    h1_dir = "BUY"
+                    
+                    # Hedge 2 (Sell): Entry (Recovery)
+                    hedge2_price = entry_price
+                    h2_dir = "SELL"
+                    
+                    # Hedge 3 (Buy): H1 + Smart Buffer (Expansion)
+                    hedge3_price = hedge1_price + smart_buffer_dist
+                    h3_dir = "BUY"
+                    
+                    # Hedge 4 (Sell): Matches H2 (Entry)
+                    hedge4_price = hedge2_price
+                    h4_dir = "SELL"
+
+                # Log Smart Expansion Plan
+                logger.info(f"[SMART EXPANSION] H3 Buffer: {ai_expansion_factor*100:.0f}% ({smart_buffer_pips:.1f} pips) | AI: {oracle_prediction}")
+
+                # Calculate projected hedge levels for display AND execution
+                projected_hedges = []
+                
+                # Hedge 1
+                projected_hedges.append({
+                    'direction': h1_dir,
+                    'trigger_price': round(hedge1_price, 5),
+                    'lots': hedge1_lot,
+                    'tp_price': "Break-even"
+                })
+                
+                # Hedge 2
+                projected_hedges.append({
+                    'direction': h2_dir,
+                    'trigger_price': round(hedge2_price, 5),
+                    'lots': hedge2_lot,
+                    'tp_price': "Break-even"
+                })
+
+                # Hedge 3
+                projected_hedges.append({
+                    'direction': h3_dir,
+                    'trigger_price': round(hedge3_price, 5),
+                    'lots': hedge3_lot,
+                    'tp_price': "Break-even"
+                })
+                
+                # Hedge 4
+                projected_hedges.append({
+                    'direction': h4_dir,
+                    'trigger_price': round(hedge4_price, 5),
+                    'lots': hedge4_lot,
+                    'tp_price': "Break-even"
+                })
+
+                # Log using the new UI Logger
+                TradingLogger.log_initial_trade(f"{symbol}_{0 if order_type=='BUY' else 1}", {
+                    'action': order_type,
+                    'symbol': symbol,
+                    'lots': lot_size,
+                    'entry_price': entry_price,
+                    'tp_price': tp_price_broker,
+                    'tp_atr': 0.3,
+                    'tp_pips': tp_pips_entry,
+                    'hedges': projected_hedges,
+                    'atr_pips': atr_pips,
+                    'reasoning': signal.reason
+                })
+
+                # === STRUCTURED TRADING PLAN LOG ===
+                # Use TradingLogger for clean, structured output
+                
+                # Prepare data for TradingLogger
+                bucket_id = f"{symbol}_{int(time.time())}"
+                
+                # Store metadata for this trade in position manager (for AI learning and exit logic)
+                if result and result.get('ticket'):
+                    ticket = result['ticket']
+                    atr_pips = atr_value * (100 if "XAU" in symbol or "GOLD" in symbol else 10000)
+                    
+                    # Use thread-safe persistence method
+                    self.position_manager.record_trade_metadata(ticket, {
+                        "symbol": symbol,
+                        "type": order_type,
+                        "entry_price": entry_price,
+                        "entry_tp_pips": tp_pips,  # Store fixed TP target
+                        "entry_sl_pips": 0.0,  # NO SL - hedging strategy only
+                        "entry_atr": atr_value,  # Store ATR at entry
+                        "obs": [0.0, atr_value, trend_strength, nexus_conf],  # AI observation
+                        "action": [1.0, 0.8],  # Default hedge params
+                        "open_time": time.time(),
+                        "hedge_plan": {
+                            "hedge1_trigger_price": hedge1_price,
+                            "hedge2_trigger_price": hedge2_price,
+                            "hedge3_trigger_price": hedge3_price,
+                            "hedge4_trigger_price": hedge4_price,
+                            "hedge1_lots": hedge1_lot,
+                            "hedge2_lots": hedge2_lot,
+                            "hedge3_lots": hedge3_lot,
+                            "hedge4_lots": hedge4_lot,
+                            "zone_width_pips": format_pips(zone_pips, symbol)
+                        }
+                    })
+                    logger.debug(f"[METADATA] Stored entry data for ticket #{ticket}: TP={tp_pips:.1f}pips, ATR={atr_pips:.1f}pips (No SL - Hedge Strategy)")
+                
+                return result
+            else:
+                logger.error("Trade execution failed")
+                return None
+
+        except Exception as e:
+            logger.error(f"Trade execution error: {e}")
+            return None
+
+    async def process_position_management(self, symbol: str, positions: List[Dict],
+                                  tick: Dict, point: float, shield, ppo_guardian,
+                                  nexus=None, rsi_value: float = 50.0) -> bool:
+        """
+        Process position management for a symbol.
+
+        Args:
+            symbol: Trading symbol
+            positions: List of positions
+            tick: Current tick data
+            point: Point value
+            shield: IronShield instance
+            ppo_guardian: PPO Guardian instance
+            nexus: Optional NexusBrain instance
+
+        Returns:
+            True if positions were managed (closed/opened)
+        """
+        logger.info(f"[POS_MGMT] Called for {symbol} with {len(positions)} positions")
+        
+        if not positions:
+            return False
+        
+        # OPTIMIZATION: Removed redundant broker.get_positions() call.
+        # The caller (_process_existing_positions) already synced with broker.
+        # We just need to filter out any known ghost tickets.
+        
+        # Filter out ghost tickets
+        positions = [p for p in positions if p['ticket'] not in self.position_manager._ghost_tickets]
+        
+        if not positions:
+            return False
+
+        # Only log when we have multiple positions (actual bucket)
+        if len(positions) > 1:
+            logger.info(f"[BUCKET] Checking exit for {symbol}: {len(positions)} positions")
+
+        # Check for bucket exits first
+        bucket_closed = False
+
+        # Find or create bucket for positions
+        position_tickets = [p['ticket'] for p in positions]
+        bucket_id = self.position_manager.find_bucket_by_tickets(position_tickets)
+        
+        if not bucket_id:
+            # No existing bucket - create new one
+            position_objects = [
+                self.position_manager.active_positions.get(p['ticket'])
+                for p in positions
+                if p['ticket'] in self.position_manager.active_positions
+            ]
+            
+            if position_objects:
+                bucket_id = self.position_manager.create_bucket(position_objects)
+                if len(positions) > 1:
+                    logger.info(f"[BUCKET] CREATED NEW: {bucket_id} with {len(positions)} positions")
+                else:
+                    logger.debug(f"[BUCKET] CREATED NEW: {bucket_id} for single position (enables TP/Zone tracking)")
+        else:
+            logger.debug(f"[BUCKET] REUSING EXISTING: {bucket_id} for {len(positions)} positions")
+
+        # Check if bucket should be closed
+        # Prepare market data for intelligent scalping analysis
+        atr_value = self.market_data.calculate_atr(symbol, 14)
+        trend_strength = self.market_data.calculate_trend_strength(symbol, 20)
+        market_data = {
+            'atr': atr_value,  # ATR in points
+            'spread': abs(tick['ask'] - tick['bid']),  # Spread in points
+            'trend_strength': trend_strength,  # Trend strength 0-1
+            'current_price': (tick['ask'] + tick['bid']) / 2,
+            'bid': tick['bid'], # Explicit Bid
+            'ask': tick['ask'], # Explicit Ask
+            'point': point  # Point value for pip calculations
+        }
+
+        # Periodic position status update (every 20 seconds) to show AI is monitoring
+        current_time = time.time()
+        if current_time - self._last_position_status_time >= 20.0:
+            self._last_position_status_time = current_time
+            first_pos = positions[0]
+            entry_price = first_pos.get('price_open', 0)
+            current_price = market_data['current_price']
+            
+            # Calculate pips correctly: XAUUSD uses 100 (1 pip = 0.01), forex uses 10000 (1 pip = 0.0001)
+            pip_multiplier = 100 if "XAU" in symbol or "GOLD" in symbol else 10000
+            atr_pips = atr_value * pip_multiplier  # ATR in pips
+            
+            # Check for stored TP in metadata
+            tp_pips = atr_pips * 0.3  # Default dynamic TP
+            tp_source = "Dynamic 0.3 ATR"
+            
+            try:
+                ticket = first_pos.get('ticket') if isinstance(first_pos, dict) else first_pos.ticket
+                if ticket in self.position_manager.active_learning_trades:
+                    metadata = self.position_manager.active_learning_trades[ticket]
+                    stored_tp = metadata.get('entry_tp_pips', 0.0)
+                    if stored_tp > 0:
+                        tp_pips = stored_tp
+                        tp_source = "Stored"
+            except Exception:
+                pass
+            
+            # Calculate current P&L in pips
+            if first_pos.get('type') == 0:  # BUY
+                pnl_pips = (current_price - entry_price) * pip_multiplier
+            else:  # SELL
+                pnl_pips = (entry_price - current_price) * pip_multiplier
+            
+            # Changed to INFO to show position monitoring every 20 seconds
+            logger.info(f"[POSITION] MONITORING: P&L: {pnl_pips:.1f} pips | TP Target: {tp_pips:.1f} pips ({tp_source}) | AI checking exit conditions...")
+
+        # Initialize bucket_closed to False
+        bucket_closed = False
+        
+        logger.info(f"[TP_CHECK] About to call should_close_bucket for {bucket_id}")
+        should_close, confidence = self.position_manager.should_close_bucket(
+            bucket_id, ppo_guardian, nexus, market_data
+        )
+        logger.info(f"[TP_CHECK] should_close_bucket returned: {should_close}, confidence: {confidence}")
+
+        if should_close:
+            logger.info(f"[BUCKET] EXIT TRIGGERED: Confidence {confidence:.3f} - Closing all positions")
+            bucket_closed = await self.position_manager.close_bucket_positions(
+                self.broker, bucket_id, symbol
+            )
+            if bucket_closed:
+                logger.info(f"[BUCKET] CLOSED SUCCESSFULLY: {bucket_id}")
+            else:
+                logger.warning(f"[BUCKET] CLOSE FAILED: {bucket_id}")
+        # Only log if exit was checked and failed (for debugging)
+        # Silent operation when no exit needed - reduces log spam
+
+        # If bucket not closed, check for zone recovery (only log if executed)
+        if not bucket_closed:
+            logger.info(f"[ZONE_CHECK] Bucket {bucket_id} not closed, checking zone recovery")
+            
+            # Convert Position objects to dictionaries for zone recovery
+            positions_dict = [
+                {
+                    'ticket': p.get('ticket') if isinstance(p, dict) else p.ticket,
+                    'symbol': p.get('symbol') if isinstance(p, dict) else p.symbol,
+                    'type': p.get('type') if isinstance(p, dict) else p.type,
+                    'volume': p.get('volume') if isinstance(p, dict) else p.volume,
+                    'price_open': p.get('price_open') if isinstance(p, dict) else p.price_open,
+                    'price_current': p.get('price_current') if isinstance(p, dict) else p.price_current,
+                    'profit': p.get('profit') if isinstance(p, dict) else p.profit,
+                    'sl': p.get('sl') if isinstance(p, dict) else p.sl,
+                    'tp': p.get('tp') if isinstance(p, dict) else p.tp,
+                    'time': p.get('time') if isinstance(p, dict) else p.time,
+                    'comment': p.get('comment', '') if isinstance(p, dict) else getattr(p, 'comment', '')
+                }
+                for p in positions
+            ]
+            
+            # Calculate point value for symbol (XAUUSD uses different pip size)
+            if "XAU" in symbol or "GOLD" in symbol:
+                point_value = 0.01  # XAUUSD: 1 pip = 0.01
+            elif "JPY" in symbol:
+                point_value = 0.01  # JPY pairs: 1 pip = 0.01
+            else:
+                point_value = 0.0001  # Standard forex: 1 pip = 0.0001
+            
+            # Calculate current ATR for dynamic zone sizing
+            atr_value = self.market_data.calculate_atr(symbol, 14) if hasattr(self.market_data, 'calculate_atr') else 0.0010
+            
+            # Get volatility ratio
+            volatility_ratio = self.market_data.get_volatility_ratio() if hasattr(self.market_data, 'get_volatility_ratio') else 1.0
+
+            logger.info(f"[ZONE_CHECK] Calling execute_zone_recovery for {symbol} with {len(positions_dict)} positions | ATR: {atr_value:.5f} | VolRatio: {volatility_ratio:.2f}")
+            zone_recovery_executed = self.risk_manager.execute_zone_recovery(
+                self.broker, symbol, positions_dict, tick, point_value,
+                shield, ppo_guardian, self.position_manager, nexus, atr_val=atr_value,
+                volatility_ratio=volatility_ratio, rsi_value=rsi_value
+            )
+            if zone_recovery_executed:
+                logger.info(f"[ZONE] RECOVERY EXECUTED for {symbol}")
+                # Force immediate update of position cache to reflect new hedge
+                # This prevents "Ghost Trades" where the bot doesn't know about the new hedge
+                await asyncio.sleep(0.2) # Give broker a moment
+                all_positions = self.broker.get_positions()
+                if all_positions:
+                    self.position_manager.update_positions(all_positions)
+                    logger.info(f"[SYNC] Positions updated after hedge. Total: {len(all_positions)}")
+            else:
+                logger.debug(f"[ZONE_CHECK] No recovery needed for {symbol}")
+            return zone_recovery_executed
+
+        return bucket_closed
+
+    def get_session_stats(self) -> Dict[str, Any]:
+        """Get current session statistics."""
+        stats = self.session_stats.copy()
+        stats["runtime_seconds"] = time.time() - stats["start_time"]
+        return stats
+
+    def reset_session_stats(self) -> None:
+        """Reset session statistics."""
+        self.session_stats = {
+            "trades_opened": 0,
+            "trades_closed": 0,
+            "total_profit": 0.0,
+            "win_rate": 0.0,
+            "start_time": time.time()
+        }
+        logger.info("Session statistics reset")
+
+    async def run_trading_cycle(self, council, strategist, shield, ppo_guardian,
+                               nexus=None, oracle=None) -> None:
+        """
+        Run a complete trading cycle.
+
+        Args:
+            council: Council instance
+            strategist: Strategist instance
+            shield: IronShield instance
+            ppo_guardian: PPO Guardian instance
+            nexus: Optional NexusBrain instance
+            oracle: Optional Oracle instance (Layer 4)
+        """
+        symbol = self.config.symbol
+
+        try:
+            # Get market data
+            tick = self.market_data.get_tick_data(symbol)
+            if not tick:
+                return
+
+            # Record market data to database
+            await self._record_market_data(symbol, tick)
+
+            # Validate market conditions
+            market_ok, reason = self.validate_market_conditions(symbol, tick)
+            
+            if not market_ok:
+                # [UI FEEDBACK] Log pause reason only when it changes to avoid spam
+                if reason != self.last_pause_reason:
+                    logger.info(f"[PAUSED] TRADING PAUSED: {reason}")
+                    self.last_pause_reason = reason
+                return
+            
+            # [UI FEEDBACK] Log resumption if we were previously paused
+            if self.last_pause_reason is not None:
+                logger.info(f"[RESUMED] TRADING RESUMED: Market conditions normalized.")
+                self.last_pause_reason = None
+
+            # Get account info
+            account_info = self.broker.get_account_info()
+            if not account_info:
+                return
+
+            # Process management for existing positions
+            if await self._process_existing_positions(symbol, tick, shield, ppo_guardian, nexus):
+                return  # Skip new entries if positions were managed
+
+            # --- LAYER 4: ORACLE ENGINE ---
+            oracle_prediction = "NEUTRAL"
+            oracle_confidence = 0.0
+            history = self.market_data.candles.get_history(symbol) # Get history once
+            
+            if oracle:
+                # Get last 60 candles close prices
+                if len(history) >= 60:
+                    closes = [c['close'] for c in history[-60:]]
+                    oracle_prediction, oracle_confidence = oracle.predict(closes)
+                    if oracle_confidence > 0.6:
+                        logger.info(f"[ORACLE] Prediction: {oracle_prediction} ({oracle_confidence:.2f})")
+
+            # --- LAYER 6: THE CHAMELEON (Regime Detection) ---
+            # Detect Market Regime (Ranging, Trending, Volatile)
+            market_regime = council.sentinel.detect_regime(history)
+            logger.info(f"[CHAMELEON] Market Regime: {market_regime.name}")
+
+            # Generate trade signal
+            market_data_dict = {
+                'history': history,
+                'nexus_candles': self.market_data.candles.get_nexus_candles(symbol),
+                'full_candles': self.market_data.candles.get_full_candles(symbol),
+                'account_info': account_info,
+                'macro_slope': 0.0,  # Would be calculated
+                'sentiment_score': 0.0,  # Would be calculated
+                'oracle_prediction': oracle_prediction,
+                'oracle_confidence': oracle_confidence,
+                'market_regime': market_regime # Pass to signal generator if needed
+            }
+
+            signal = self.generate_trade_signal(symbol, council, market_data_dict)
+            if not signal:
+                return
+            
+            # --- CHAMELEON FILTER (SOFT PENALTY) ---
+            # Instead of blocking, reduce lot size for Counter-Trend trades
+            regime_penalty = 1.0
+            if market_regime.name == "TRENDING_UP" and signal.action == TradeAction.SELL:
+                regime_penalty = 0.5 # Cut lots in half
+                logger.info(f"[CHAMELEON] CAUTION: Counter-Trend SELL. Reducing lots by 50%.")
+            elif market_regime.name == "TRENDING_DOWN" and signal.action == TradeAction.BUY:
+                regime_penalty = 0.5 # Cut lots in half
+                logger.info(f"[CHAMELEON] CAUTION: Counter-Trend BUY. Reducing lots by 50%.")
+                
+            # --- ORACLE FILTER (SOFT PENALTY) ---
+            # If Oracle strongly disagrees, reduce lot size further
+            oracle_penalty = 1.0
+            if oracle_prediction != "NEUTRAL" and oracle_confidence > 0.7:
+                if (signal.action == TradeAction.BUY and oracle_prediction == "DOWN") or \
+                   (signal.action == TradeAction.SELL and oracle_prediction == "UP"):
+                    oracle_penalty = 0.5
+                    logger.info(f"[ORACLE] CAUTION: Signal contradicts Oracle. Reducing lots by 50%.")
+
+            # --- LAYER 9: GLOBAL BRAIN (SOFT PENALTY) ---
+            # Check DXY/US10Y impact on Gold
+            global_bias = 0.0
+            brain_penalty = 1.0
+            if self.global_brain and ("XAU" in symbol or "GOLD" in symbol):
+                # In a real scenario, we'd pass a dict of current prices for DXY, US10Y etc.
+                # For now, we assume the GlobalBrain is fetching its own data or using what's available
+                # We can pass the current tick price of the symbol itself as a reference
+                current_prices = {symbol: tick['bid']} 
+                correlation_signal = self.global_brain.analyze_impact(current_prices)
+                
+                if correlation_signal.score != 0.0:
+                    global_bias = correlation_signal.score
+                    logger.info(f"[GLOBAL_BRAIN] Correlation Bias: {global_bias:.2f} (Driver: {correlation_signal.driver})")
+                    
+                    # PENALTY LOGIC: If Global Brain disagrees, reduce size
+                    if global_bias < -0.5 and signal.action == TradeAction.BUY:
+                         brain_penalty = 0.5
+                         logger.info(f"[GLOBAL_BRAIN] CAUTION: Bearish Correlation ({global_bias:.2f}). Reducing lots by 50%.")
+                    elif global_bias > 0.5 and signal.action == TradeAction.SELL:
+                         brain_penalty = 0.5
+                         logger.info(f"[GLOBAL_BRAIN] CAUTION: Bullish Correlation ({global_bias:.2f}). Reducing lots by 50%.")
+
+            # Calculate ATR and trend for PPO
+            atr_value, trend_strength = self._calculate_indicators(symbol)
+
+            # Calculate position size with PPO optimization
+            lot_size, lot_reason = self.calculate_position_size(
+                signal, account_info, strategist, shield,
+                ppo_guardian=ppo_guardian,
+                atr_value=atr_value,
+                trend_strength=trend_strength
+            )
+            
+            # === APPLY INTELLIGENCE PENALTIES ===
+            # Combine all penalties (Regime * Oracle * Brain)
+            # Example: 0.5 * 0.5 * 1.0 = 0.25 (Quarter Size)
+            total_penalty = regime_penalty * oracle_penalty * brain_penalty
+            
+            if total_penalty < 1.0:
+                old_lot = lot_size
+                lot_size = round(lot_size * total_penalty, 4)
+                # Ensure we don't go below minimum lot (usually 0.01)
+                lot_size = max(lot_size, 0.01)
+                lot_reason += f" (AI Penalty: {total_penalty:.2f}x)"
+                logger.info(f"[AI_COUNCIL] Consensus Weak. Reducing Size: {old_lot} -> {lot_size} lots")
+
+            # --- CHAMELEON VOLATILITY SCALING ---
+            # If Volatile, cut lot size in half for safety
+            if market_regime.name == "VOLATILE":
+                lot_size = lot_size * 0.5
+                lot_reason += " (Reduced 50% due to VOLATILE regime)"
+                logger.info(f"[CHAMELEON] Volatility Detected! Reducing lot size to {lot_size:.2f}")
+
+            if lot_size <= 0:
+                logger.info(f"[POSITION] SIZING REJECTED: {lot_reason}")
+                return
+
+            # Normalize lot size to broker requirements BEFORE logging or executing
+            # This ensures the logs match the actual execution
+            if hasattr(self.broker, 'normalize_lot_size'):
+                raw_lot = lot_size
+                lot_size = self.broker.normalize_lot_size(symbol, lot_size)
+                if raw_lot != lot_size:
+                     # Only log if significant change
+                     if abs(raw_lot - lot_size) > 0.000001:
+                        logger.info(f"[LOT ADJUST] Normalized {raw_lot} -> {lot_size} to match broker requirements")
+
+            # Only log lot size if the signal was just logged (i.e., it changed)
+            if self._last_signal_logged:
+                logger.info(f"[POSITION] SIZE CALCULATED: {lot_size} lots | Reason: {lot_reason}")
+
+            # Final validation (is_recovery_trade=False for normal entries)
+            can_enter, entry_reason = self.validate_trade_entry(signal, lot_size, account_info, tick, is_recovery_trade=False)
+            if not can_enter:
+                # Handle Cooldown Logs specifically (Throttled)
+                if "cooldown" in entry_reason.lower():
+                    current_time = time.time()
+                    if current_time - self._last_cooldown_log_time > 5.0:
+                        remaining_msg = ""
+                        # Try to extract time from "Global cooldown: X.Xs < Y.Ys"
+                        if "Global cooldown" in entry_reason and "<" in entry_reason:
+                            try:
+                                parts = entry_reason.split('<')
+                                limit = float(parts[1].replace('s', '').strip())
+                                current = float(parts[0].split(':')[1].replace('s', '').strip())
+                                remaining = limit - current
+                                remaining_msg = f" Resuming in {remaining:.1f}s"
+                            except:
+                                pass
+                        
+                        logger.info(f"[PAUSED] Trading Halted: {entry_reason}.{remaining_msg}")
+                        self._last_cooldown_log_time = current_time
+
+                # Suppress repetitive blocking logs (cooldown, position exists) - only log once when signal changes
+                elif "already exists" not in entry_reason.lower():
+                    logger.info(f"[TRADE] ENTRY BLOCKED: {entry_reason}")
+                elif "already exists" in entry_reason.lower() and self._last_signal_logged:
+                    # Only log position blocking when signal just changed (not every cycle)
+                    logger.info(f"[TRADE] ENTRY BLOCKED: {entry_reason}")
+                return
+
+            logger.info(f"[TRADE] VALIDATION PASSED: All entry conditions met")
+            
+            # Update last_trade_time IMMEDIATELY to prevent race conditions
+            self.last_trade_time = time.time()
+
+            # Execute trade
+            # --- GENERATE ENTRY SUMMARY ---
+            
+            # 1. Calculate Virtual TP using IronShield (Same logic as execution)
+            atr_value = self.market_data.calculate_atr(symbol, 14) if hasattr(self.market_data, 'calculate_atr') else 0.0010
+            
+            # Convert ATR to points based on symbol type
+            if 'JPY' in symbol or 'XAU' in symbol:
+                atr_points = atr_value * 100
+                pip_multiplier = 100
+            else:
+                atr_points = atr_value * 10000
+                pip_multiplier = 10000
+                
+            # Get dynamic params from Shield
+            zone_points, tp_points = shield.get_dynamic_params(atr_points)
+            tp_pips = tp_points # This is in pips (e.g. 25.0)
+            
+            is_buy = signal.action == TradeAction.BUY
+            entry_price = tick['ask'] if is_buy else tick['bid']
+            
+            # Calculate Virtual TP Price
+            if is_buy:
+                virtual_tp_price = entry_price + (tp_pips / pip_multiplier)
+            else:
+                virtual_tp_price = entry_price - (tp_pips / pip_multiplier)
+
+            # Generate Clean Entry Summary
+            summary = (
+                f"\n📋 ================= ENTRY SUMMARY ================= 📋\n"
+                f"🚀 Initial Trade: {signal.action.value} {lot_size} lots @ {entry_price:.5f}\n"
+                f"🎯 Target:        Dynamic (Bucket Logic)\n"
+                f"📍 Virtual TP:    {virtual_tp_price:.5f} (+{tp_pips:.1f} pips)\n"
+                f"----------------------------------------------------\n"
+                f"🧠 AI Analysis:   {signal.reason}\n"
+                f"===================================================="
+            )
+            
+            # [FIX] Windows Console Compatibility - Force clean version on Windows
+            clean_summary = (
+                f"\n=== ENTRY SUMMARY ===\n"
+                f"Initial Trade: {signal.action.value} {lot_size} lots @ {entry_price:.5f}\n"
+                f"Target:        Dynamic (Bucket Logic)\n"
+                f"Virtual TP:    {virtual_tp_price:.5f} (+{tp_pips:.1f} pips)\n"
+                f"----------------------------------------------------\n"
+                f"AI Analysis:   {signal.reason}\n"
+                f"===================================================="
+            )
+            
+            import sys
+            if sys.platform == 'win32':
+                ui_logger.info(clean_summary)
+            else:
+                try:
+                    ui_logger.info(summary)
+                except Exception:
+                    ui_logger.info(clean_summary)
+            
+            result = await self.execute_trade_entry(signal, lot_size, tick, strategist, shield)
+            if result:
+                logger.info(f"[TRADE] EXECUTION SUCCESSFUL: {signal.action.value} {signal.symbol} {lot_size} lots @ {tick['ask'] if signal.action == TradeAction.BUY else tick['bid']:.5f}")
+                logger.info(f"   [EXIT] STRATEGY: Virtual TP/SL managed by bucket logic | AI Confidence: {signal.confidence:.3f}")
+            else:
+                logger.error(f"[TRADE] EXECUTION FAILED for {signal.symbol}")
+
+        except Exception as e:
+            logger.error(f"Error in trading cycle: {e}")
+
+    async def _record_market_data(self, symbol: str, tick: Dict) -> None:
+        """Record tick and candle data to database."""
+        if not self.db_queue:
+            return
+
+        # Record tick data
+        tick_data = TickData(
+            symbol=symbol,
+            bid=tick['bid'],
+            ask=tick['ask'],
+            timestamp=time.time(),
+            flags=0
+        )
+        await self.db_queue.add_tick(tick_data)
+
+        # Record candle data if available
+        if self.market_data.candles._cache:
+            latest_candle = self.market_data.candles.get_latest_candle(symbol)
+            if latest_candle:
+                candle_data = CandleData(
+                    symbol=symbol,
+                    timeframe=self.config.timeframe,
+                    open_price=latest_candle.get('open', 0),
+                    high=latest_candle.get('high', 0),
+                    low=latest_candle.get('low', 0),
+                    close=latest_candle.get('close', 0),
+                    volume=latest_candle.get('volume', 0),
+                    timestamp=time.time()
+                )
+                await self.db_queue.add_candle(candle_data)
+
+    def _get_symbol_properties(self, symbol):
+        """
+        Returns correct pip value and point size for the symbol.
+        CRITICAL: Distinguishes between Forex (10.0) and Gold (1.0).
+        """
+        symbol_upper = symbol.upper()
+        
+        if "XAU" in symbol_upper or "GOLD" in symbol_upper:
+            return {
+                "pip_value": 1.0,      # 1 pip = $1 per lot (approx) on Gold
+                "point_size": 0.01,    # Price moves in cents
+                "pip_size": 0.10       # Standard Gold Pip is 10 cents
+            }
+        elif "JPY" in symbol_upper:
+            return {
+                "pip_value": 9.0,      # Approx for JPY pairs
+                "point_size": 0.001,
+                "pip_size": 0.01
+            }
+        else: # Standard Forex (EURUSD, GBPUSD, etc.)
+            return {
+                "pip_value": 10.0,     # Standard Lot = $10/pip
+                "point_size": 0.00001,
+                "pip_size": 0.0001
+            }
+
+    async def _process_existing_positions(self, symbol: str, tick: Dict, shield, ppo_guardian, nexus) -> bool:
+        """
+        Process management for existing positions.
+        Returns True if positions were managed (skipping new entries).
+        """
+        # Update positions from broker
+        all_positions = self.broker.get_positions()
+        
+        # FAIL-SAFE: If broker returns None (error), DO NOT update or cleanup.
+        # This prevents wiping state during temporary connection loss.
+        if all_positions is None:
+            logger.warning("[PROCESS_POS] Failed to fetch positions from broker - skipping update")
+            return False
+
+        # Always update positions, even if empty, to ensure closed positions are removed
+        self.position_manager.update_positions(all_positions)
+        # CRITICAL: Cleanup stale positions immediately after broker update
+        self.position_manager.cleanup_stale_positions(all_positions)
+        self.position_manager._update_bucket_stats()
+
+        # Get positions for this symbol
+        symbol_positions = self.position_manager.get_positions_for_symbol(symbol)
+
+        logger.debug(f"[PROCESS_POS] Found {len(symbol_positions)} positions for {symbol}")
+
+        if symbol_positions:
+            # Get symbol properties for point value
+            # Get Symbol Properties for Math
+            props = self._get_symbol_properties(symbol)
+            point_value = props['point_size']
+
+            logger.debug(f"[PROCESS_POS] Calling process_position_management with {len(symbol_positions)} positions")
+            
+            # --- ELASTIC DEFENSE PROTOCOL INTEGRATION ---
+            # 1. Get Live Market Intelligence
+            current_atr = self.market_data.calculate_atr(symbol)
+            current_rsi = self.market_data.calculate_rsi(symbol)
+            
+            # 2. Check Dynamic Hedge Trigger (if we have positions)
+            # We only intervene if the bucket is losing
+            bucket_pnl = sum(p.profit for p in symbol_positions)
+            
+            # Check if we should use Elastic Defense OR fallback to Zone Recovery
+            # If Elastic Defense says "WAIT" (should_hedge=False), we must ensure Zone Recovery doesn't override it blindly.
+            # However, Zone Recovery handles the "Grid" logic.
+            # To make them work together:
+            # - If Elastic Defense triggers, we execute immediately.
+            # - If Elastic Defense says "Wait", we let process_position_management run, BUT we inject the "Wait" signal into Risk Manager?
+            # Actually, simpler: We trust Elastic Defense as the primary trigger for NEW hedges.
+            # But process_position_management also handles CLOSING (TP/SL). We must run that.
+            
+            elastic_hedge_triggered = False
+            
+            if bucket_pnl < 0 and len(symbol_positions) < self.risk_manager.config.max_hedges:
+                last_pos = symbol_positions[-1]
+                
+                # Ask Iron Shield: "Should we hedge now?"
+                should_hedge, req_dist = shield.calculate_dynamic_hedge_trigger(
+                    entry_price=last_pos.price_open,
+                    current_price=tick['bid'] if last_pos.type == 0 else tick['ask'],
+                    trade_type=last_pos.type,
+                    atr=current_atr,
+                    rsi=current_rsi,
+                    hedge_count=len(symbol_positions) - 1
+                )
+                
+                if should_hedge:
+                    # Calculate Intelligent Lot Size using correct pip_value
+                    recovery_dist_pips = (current_atr / props['point_size']) # Convert price delta to points
+                    
+                    hedge_lot = shield.calculate_recovery_lot_size(
+                        positions=symbol_positions,
+                        current_price=tick['bid'],
+                        target_recovery_pips=recovery_dist_pips,
+                        symbol_step=0.01, # Assuming standard step
+                        pip_value=props['pip_value'], # Pass the correct value (1.0 for Gold)
+                        atr=current_atr,    # PASSING AI DATA
+                        rsi=current_rsi     # PASSING AI DATA
+                    )
+                    
+                    # Execute Hedge
+                    hedge_type = "SELL" if last_pos.type == 0 else "BUY"
+                    
+                    # Construct AI Reason for User
+                    ai_reason = "Standard Volatility Defense"
+                    if hedge_type == "BUY":
+                        if current_rsi > 75: ai_reason = f"Extreme Bullish Momentum (RSI {current_rsi:.1f}). Max Aggression (1.25x) to counter Sell loss."
+                        elif current_rsi > 60: ai_reason = f"Strong Bullish Trend (RSI {current_rsi:.1f}). Increased Aggression (1.15x)."
+                        else: ai_reason = f"Normal Market (RSI {current_rsi:.1f}). Standard Overpower (1.05x)."
+                    else: # SELL
+                        if current_rsi < 25: ai_reason = f"Extreme Bearish Momentum (RSI {current_rsi:.1f}). Max Aggression (1.25x) to counter Buy loss."
+                        elif current_rsi < 40: ai_reason = f"Strong Bearish Trend (RSI {current_rsi:.1f}). Increased Aggression (1.15x)."
+                        else: ai_reason = f"Normal Market (RSI {current_rsi:.1f}). Standard Overpower (1.05x)."
+
+                    # Use UI Logger for visible terminal output
+                    ui_logger.info(f"\n=== HEDGE {len(symbol_positions)} EXECUTED ===")
+                    ui_logger.info(f"Hedge {len(symbol_positions)}:       {hedge_lot:.2f} lots @ {tick['bid'] if hedge_type == 'SELL' else tick['ask']:.5f}")
+                    ui_logger.info(f"AI Reason:     {ai_reason}")
+                    ui_logger.info(f"Context:       ATR={current_atr:.4f} | Dist={recovery_dist_pips:.1f} pips")
+                    ui_logger.info(f"==================================")
+                    
+                    # Execute directly via broker to bypass standard entry checks
+                    self.broker.execute_order(
+                        action="OPEN",
+                        symbol=symbol,
+                        order_type=hedge_type,
+                        volume=hedge_lot,
+                        price=tick['bid'] if hedge_type == "SELL" else tick['ask'],
+                        sl=0.0, tp=0.0,
+                        comment="Elastic_Hedge"
+                    )
+                    elastic_hedge_triggered = True
+                    return True # Managed
+
+            # If Elastic Defense didn't trigger a hedge, we still check for EXITS (TP/SL)
+            # But we should probably prevent Zone Recovery from adding a hedge if Elastic Defense said "Wait".
+            # For now, let's assume process_position_management is mainly for Exits and Zone Recovery.
+            # If we want to disable old Zone Recovery, we should do it in Risk Manager or here.
+            # Let's rely on the fact that Elastic Defense is "tighter" or "smarter".
+            # If Elastic Defense says "Wait" (e.g. RSI), but Zone Recovery says "Hedge" (Fixed Pips),
+            # we have a conflict.
+            # To fix this, we will modify Risk Manager to respect RSI as well (which we did in previous step via IronShield update).
+            
+            positions_managed = await self.process_position_management(
+                symbol, [p.__dict__ for p in symbol_positions], tick,
+                point_value, shield, ppo_guardian, nexus, rsi_value=current_rsi
+            )
+            
+            logger.debug(f"[PROCESS_POS] process_position_management returned: {positions_managed}")
+            
+            if positions_managed:
+                logger.info(f"[POSITION] MANAGEMENT EXECUTED for {symbol} - Skipping new entries")
+                return True
+        
+        return False
+
+    def _calculate_indicators(self, symbol: str) -> Tuple[float, float]:
+        """Calculate ATR and trend strength."""
+        atr_value = self.market_data.calculate_atr(symbol, 14) if hasattr(self.market_data, 'calculate_atr') else 0.0010
+        trend_strength = self.market_data.calculate_trend_strength(symbol, 20) if hasattr(self.market_data, 'calculate_trend_strength') else 0.0
+        return atr_value, trend_strength

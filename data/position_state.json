@@ -1,0 +1,284 @@
+{
+  "bucket_stats": {
+    "XAUUSD_0": {
+      "bucket_id": "XAUUSD_0",
+      "positions": [
+        212730216,
+        212730270,
+        212730272,
+        212730273
+      ],
+      "net_profit": 1200.1799999999998,
+      "open_time": 1765343952.0321553,
+      "last_update": 1765343952.0361521,
+      "closed": true,
+      "state": "closed",
+      "mode": "bucket",
+      "last_state_check": 1765343952.0361521,
+      "exit_reason": "PROFIT"
+    },
+    "XAUUSD_1": {
+      "bucket_id": "XAUUSD_1",
+      "positions": [],
+      "net_profit": -14.24,
+      "open_time": 1764740689.6577091,
+      "last_update": 1764740690.8129733,
+      "closed": true,
+      "state": "single_active",
+      "mode": "single",
+      "last_state_check": 1764740689.6577091,
+      "exit_reason": ""
+    }
+  },
+  "closed_buckets": [
+    "XAUUSD_0",
+    "XAUUSD_1"
+  ],
+  "active_learning_trades": {
+    "209122073": {
+      "symbol": "XAUUSD",
+      "type": "SELL",
+      "entry_price": 4158.6,
+      "obs": [
+        36.999999999989086,
+        0.001,
+        0.0,
+        0.0
+      ],
+      "action": [
+        1.0,
+        0.8
+      ],
+      "open_time": 1764266101.6891983
+    },
+    "209123252": {
+      "symbol": "XAUUSD",
+      "type": "BUY",
+      "entry_price": 4158.48,
+      "entry_tp_pips": 16.842857142862286,
+      "entry_sl_pips": 0.0,
+      "entry_atr": 0.5614285714287429,
+      "obs": [
+        0.0,
+        0.5614285714287429,
+        0.15,
+        0.36068013310432434
+      ],
+      "action": [
+        1.0,
+        0.8
+      ],
+      "open_time": 1764266717.405168,
+      "hedge_plan": {
+        "hedge1_trigger_price": 4158.339642857142,
+        "hedge2_trigger_price": 4158.199285714285,
+        "hedge3_trigger_price": 4158.058928571428,
+        "zone_width_pips": "14.04"
+      }
+    },
+    "209432582": {
+      "symbol": "XAUUSD",
+      "type": "BUY",
+      "entry_price": 4208.17,
+      "obs": [
+        268.0000000000291,
+        0.001,
+        0.0,
+        0.0
+      ],
+      "action": [
+        1.0,
+        0.8
+      ],
+      "open_time": 1764349219.7108274
+    },
+    "209435872": {
+      "symbol": "XAUUSD",
+      "type": "BUY",
+      "entry_price": 4209.0,
+      "obs": [
+        82.99999999999272,
+        0.001,
+        0.0,
+        0.0
+      ],
+      "action": [
+        1.0,
+        0.8
+      ],
+      "open_time": 1764349585.8230274
+    },
+    "209439257": {
+      "symbol": "XAUUSD",
+      "type": "SELL",
+      "entry_price": 4205.44,
+      "obs": [
+        64.00000000003274,
+        0.001,
+        0.0,
+        0.0
+      ],
+      "action": [
+        1.0,
+        0.8
+      ],
+      "open_time": 1764349999.2164764
+    },
+    "209440807": {
+      "symbol": "XAUUSD",
+      "type": "SELL",
+      "entry_price": 4205.71,
+      "obs": [
+        119.99999999998181,
+        0.001,
+        0.0,
+        0.0
+      ],
+      "action": [
+        1.0,
+        0.8
+      ],
+      "open_time": 1764350241.9076078
+    },
+    "209634721": {
+      "symbol": "XAUUSD",
+      "type": "BUY",
+      "entry_price": 4236.4,
+      "obs": [
+        9.99999999994543,
+        0.001,
+        0.0,
+        0.0
+      ],
+      "action": [
+        1.0,
+        0.8
+      ],
+      "open_time": 1764560927.5901186
+    },
+    "209634854": {
+      "symbol": "XAUUSD",
+      "type": "BUY",
+      "entry_price": 4236.45,
+      "entry_tp_pips": 48.70714285714387,
+      "entry_sl_pips": 0.0,
+      "entry_atr": 1.6235714285714624,
+      "obs": [
+        0.0,
+        1.6235714285714624,
+        0.0,
+        0.0
+      ],
+      "action": [
+        1.0,
+        0.8
+      ],
+      "open_time": 1764560959.882431,
+      "hedge_plan": {
+        "hedge1_trigger_price": 4236.044107142857,
+        "hedge2_trigger_price": 4235.638214285714,
+        "hedge3_trigger_price": 4235.232321428572,
+        "zone_width_pips": "40.59"
+      }
+    },
+    "209640743": {
+      "symbol": "XAUUSD",
+      "type": "BUY",
+      "entry_price": 4239.38,
+      "obs": [
+        81.00000000004002,
+        0.001,
+        0.0,
+        0.0
+      ],
+      "action": [
+        1.0,
+        0.8
+      ],
+      "open_time": 1764562484.1604931
+    },
+    "209882050": {
+      "symbol": "XAUUSD",
+      "type": "SELL",
+      "entry_price": 4242.78,
+      "entry_tp_pips": 317.7000000000024,
+      "entry_sl_pips": 0.0,
+      "entry_atr": 10.59000000000008,
+      "obs": [
+        0.0,
+        10.59000000000008,
+        0.0,
+        0.0
+      ],
+      "action": [
+        1.0,
+        0.8
+      ],
+      "open_time": 1764601710.3117447,
+      "hedge_plan": {
+        "hedge1_trigger_price": 4245.4275,
+        "hedge2_trigger_price": 4248.075,
+        "hedge3_trigger_price": 4250.7225,
+        "hedge1_lots": 0.03,
+        "hedge2_lots": 0.04,
+        "hedge3_lots": 0.05,
+        "zone_width_pips": "264.75"
+      }
+    },
+    "210421348": {
+      "symbol": "XAUUSD",
+      "type": "BUY",
+      "entry_price": 4187.31,
+      "obs": [
+        0.0,
+        199,
+        0.0,
+        0.0
+      ],
+      "action": [
+        1.0,
+        0.8
+      ],
+      "open_time": 1764700853.6997626,
+      "entry_tp_pips": 199,
+      "entry_sl_pips": 0.0,
+      "entry_atr": 1.9914285714285143
+    },
+    "210548555": {
+      "symbol": "XAUUSD",
+      "type": "BUY",
+      "entry_price": 4206.16,
+      "obs": [
+        0.0,
+        201,
+        0.0,
+        0.0
+      ],
+      "action": [
+        1.0,
+        0.8
+      ],
+      "open_time": 1764740689.9600403,
+      "entry_tp_pips": 201,
+      "entry_sl_pips": 0.0,
+      "entry_atr": 2.5221428571428857
+    },
+    "212730273": {
+      "symbol": "XAUUSD",
+      "type": "SELL",
+      "entry_price": 4206.79,
+      "obs": [
+        52.999999999974534,
+        0.001,
+        0.0,
+        0.0
+      ],
+      "action": [
+        1.0,
+        0.8
+      ],
+      "open_time": 1765343149.7214527
+    }
+  },
+  "timestamp": 1765343952.0361521
+}
