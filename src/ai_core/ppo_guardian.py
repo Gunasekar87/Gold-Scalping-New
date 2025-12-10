@@ -23,6 +23,20 @@ except ImportError as e:
     class spaces:
         Box = None
 
+# [PATCH] Fix for FloatSchedule deserialization error in newer SB3 versions
+# This restores the missing class so old models can load without warnings
+try:
+    import stable_baselines3.common.utils
+    if not hasattr(stable_baselines3.common.utils, 'FloatSchedule'):
+        class FloatSchedule:
+            def __init__(self, start_value):
+                self.start_value = start_value
+            def __call__(self, progress):
+                return self.start_value
+        stable_baselines3.common.utils.FloatSchedule = FloatSchedule
+except (ImportError, AttributeError):
+    pass
+
 logger = logging.getLogger("PPOGuardian")
 
 class AetherTradingEnv(Env):

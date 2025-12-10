@@ -1,4 +1,9 @@
-﻿v4.3.1 (CRITICAL FIXES) - 2025-12-10
+﻿v4.3.2 (STABILITY FIXES) - 2025-12-10
+- [FIX] Windows Compatibility: Fixed UnicodeEncodeError in logging (removed emoji).
+- [FIX] Startup: Added Torch pre-loading to prevent DLL hangs on Windows.
+- [FIX] PositionManager: Added `magic` field to Position dataclass for correct close verification.
+
+v4.3.1 (CRITICAL FIXES) - 2025-12-10
 - [FIX] PositionManager: Added missing `calculate_net_pnl` method causing exit failures.
 - [FIX] PositionManager: Fixed `IndentationError` and missing `asyncio` import.
 - [FIX] TradingEngine: Fixed `AttributeError` (get_tick -> get_tick_data).

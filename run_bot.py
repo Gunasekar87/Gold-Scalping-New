@@ -8,6 +8,13 @@ import gc  # [CRITICAL] Added for memory tuning
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
+# [CRITICAL] Pre-load torch to prevent DLL loading hangs on Windows
+print("Initializing AI Core (this may take a moment)...")
+try:
+    import torch
+except ImportError:
+    pass
+
 # Force UTF-8 encoding for stdout and stderr to handle emojis on Windows
 if sys.platform == 'win32':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')

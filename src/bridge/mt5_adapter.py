@@ -281,7 +281,7 @@ class MT5Adapter(BrokerAdapter):
                 result = mt5.order_send(request)
                 
                 if result.retcode == mt5.TRADE_RETCODE_DONE:
-                    logger.info(f"⚡ CLOSED {ticket} at {result.price}")
+                    logger.info(f"[CLOSED] {ticket} at {result.price}")
                     return {"ticket": ticket, "retcode": result.retcode, "price": result.price}
                 elif result.retcode in [10004, 10015, 10021]: # Requote, Invalid Price, No Money
                     # Only log warning on first failure to keep logs clean
