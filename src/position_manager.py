@@ -77,6 +77,7 @@ class Position:
     sl: float
     tp: float
     time: float
+    magic: int = 0  # [FIX] Added magic number field
     comment: str = ""
     state: PositionState = PositionState.SINGLE_ACTIVE
     # Store fixed TP/SL targets set at entry (not broker's current TP/SL which may be 0)
@@ -497,6 +498,7 @@ class PositionManager:
                         sl = pos_data['sl']
                         tp = pos_data['tp']
                         time_val = pos_data['time']
+                        magic = pos_data.get('magic', 0)
                         comment = pos_data.get('comment', '')
                     else:
                         ticket = pos_data.ticket
@@ -510,6 +512,7 @@ class PositionManager:
                         sl = pos_data.sl
                         tp = pos_data.tp
                         time_val = pos_data.time
+                        magic = getattr(pos_data, 'magic', 0)
                         comment = getattr(pos_data, 'comment', '')
 
                     # Check if we have stored entry targets for this position
@@ -542,6 +545,7 @@ class PositionManager:
                         sl=sl,
                         tp=tp,
                         time=time_val,
+                        magic=magic,
                         comment=comment,
                         state=pos_state,
                         entry_tp_pips=entry_tp_pips,
@@ -1188,8 +1192,27 @@ class PositionManager:
         logger.info(f"[CLOSING] Bucket: {bucket_id} | {len(positions)} positions | ${total_pnl:.2f}")
         
         # Wait for the close to complete
-        await close_task
+        close_results = await close_task
         
+        # [CRITICAL FIX] Verify Close Results
+        successful_closes = 0
+        failed_closes = []
+        
+        for ticket, result in close_results.items():
+            if result.get('retcode') == 10009: # TRADE_RETCODE_DONE
+                successful_closes += 1
+            else:
+                failed_closes.append(f"{ticket}: {result.get('comment')} ({result.get('retcode')})")
+        
+        if failed_closes:
+            logger.error(f"⚠️ PARTIAL/FULL CLOSE FAILURE in Bucket {bucket_id}: {failed_closes}")
+            
+        if successful_closes == 0:
+            logger.error(f"❌ FAILED TO CLOSE ANY POSITIONS in Bucket {bucket_id}. Aborting summary.")
+            # Reset state to ACTIVE so we retry later
+            self._set_position_state(bucket_id, PositionState.ACTIVE)
+            return False
+
         # [ADD THIS] --- VISUAL BUCKET CLOSE SUMMARY ---
         # Calculate duration string
         minutes = int(bucket_duration // 60)
@@ -1216,8 +1239,8 @@ class PositionManager:
             f"🏁 Exit Reason:     {exit_reason}\n"
             f"⏱️ Duration:        {duration_str}\n"
             f"💵 Total PnL:       ${total_pnl:.2f} ({total_pips:+.1f} pips)\n"
-            f"📦 Positions Closed: {len(positions)}\n"
-            f"📝 Explanation:     Closed {len(positions)} position(s) after {bucket_duration/60:.1f} minutes. {exit_reason} target achieved.\n"
+            f"📦 Positions Closed: {successful_closes}/{len(positions)}\n"
+            f"📝 Explanation:     Closed {successful_closes} position(s) after {bucket_duration/60:.1f} minutes. {exit_reason} target achieved.\n"
             f"===================================================="
         )
         
@@ -1228,8 +1251,8 @@ class PositionManager:
             f"Exit Reason:     {exit_reason}\n"
             f"Duration:        {duration_str}\n"
             f"Total PnL:       ${total_pnl:.2f} ({total_pips:+.1f} pips)\n"
-            f"Positions Closed: {len(positions)}\n"
-            f"Explanation:     Closed {len(positions)} position(s) after {bucket_duration/60:.1f} minutes. {exit_reason} target achieved.\n"
+            f"Positions Closed: {successful_closes}/{len(positions)}\n"
+            f"Explanation:     Closed {successful_closes} position(s) after {bucket_duration/60:.1f} minutes. {exit_reason} target achieved.\n"
             f"===================================================="
         )
         
@@ -1242,9 +1265,6 @@ class PositionManager:
             except Exception:
                 ui_logger.info(clean_msg)
 
-        # Wait for the close to complete
-        await close_task
-        
         # [INTELLIGENCE] Clear High Water Mark Memory
         self.high_water_marks.pop(bucket_id, None)
         
