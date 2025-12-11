@@ -1,4 +1,10 @@
-﻿v4.3.2 (STABILITY FIXES) - 2025-12-10
+﻿v5.0 (MAJOR UPGRADE) - 2025-12-11
+- [NEW] Survival Mode: Dynamic TP reduction for heavy buckets to escape grid lock.
+- [FIX] Stability: Fixed PositionState.ACTIVE crash in position_manager.py.
+- [FIX] AI Core: Refactored architecture (Supervisor/Workers) and removed legacy modules.
+- [FIX] Performance: Added GC tuning and High Priority process management.
+
+v4.3.2 (STABILITY FIXES) - 2025-12-10
 - [FIX] Windows Compatibility: Fixed UnicodeEncodeError in logging (removed emoji).
 - [FIX] Startup: Added Torch pre-loading to prevent DLL hangs on Windows.
 - [FIX] PositionManager: Added `magic` field to Position dataclass for correct close verification.
