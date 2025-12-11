@@ -1243,6 +1243,80 @@ class PositionManager:
             logger.error(f"Error evaluating bucket {bucket_id} exit: {e}")
             return False, 0.0
 
+    async def update_bucket_tp(self, symbol: str, bucket_id: str):
+        """
+        Updates the TP for all positions in a bucket using Dynamic Profit Decay.
+        """
+        positions = self.get_positions_in_bucket(bucket_id)
+        if not positions:
+            return
+
+        # Get current market price
+        tick = await self.market.get_tick(symbol)
+        if not tick:
+            return
+            
+        # Calculate the new "Survival" TP
+        new_tp = self.calculate_optimized_tp(positions, tick['bid'] if positions[0]['type'] == 0 else tick['ask'])
+        
+        # Apply to all trades in the bucket
+        for pos in positions:
+            # Only update if TP is different (save API calls)
+            # Assuming pos is an object with .tp attribute
+            current_tp = getattr(pos, 'tp', 0.0)
+            if abs(current_tp - new_tp) > 0.01:
+                # Use modify_position (assuming it exists in self.market or self.broker)
+                # If not, we need to find where it is. 
+                # Usually it's self.market.modify_position or self.broker.modify_position
+                # Let's assume self.market.modify_position based on other calls
+                try:
+                    await self.market.modify_position(pos.ticket, sl=pos.sl, tp=new_tp)
+                    logger.info(f"[SURVIVAL] Updated TP for Ticket {pos.ticket} to {new_tp}")
+                except Exception as e:
+                    logger.error(f"Failed to update TP for {pos.ticket}: {e}")
+
+    def calculate_optimized_tp(self, positions, current_price):
+        """
+        SURVIVAL MODE: Calculates a dynamic TP.
+        If bucket is heavy, target Break-Even to escape fast.
+        """
+        if not positions:
+            return 0.0
+
+        total_vol = sum(p['volume'] for p in positions)
+        count = len(positions)
+        
+        # Calculate Weighted Average Price (Break-Even Point)
+        weighted_sum = sum(p['price'] * p['volume'] for p in positions)
+        avg_price = weighted_sum / total_vol
+        
+        direction = positions[0]['type']
+
+        # --- LOGIC: DYNAMIC PROFIT DECAY ---
+        # Normal: Target ~40 pips profit
+        # Heavy (>3 trades): Target ~20 pips (Minimum profit to escape)
+        # Critical (>5 trades or >1.0 lot): Target ~5 pips (Just get out!)
+        
+        if count >= 5 or total_vol > 1.0:
+            target_pips = 0.05  # Survival (5 pips)
+        elif count >= 3:
+            target_pips = 0.20  # Caution (20 pips) - [USER REQUESTED]
+        else:
+            target_pips = 0.40  # Normal (40 pips)
+
+        if direction == 'buy':
+            # Ensure TP is above Avg Price
+            final_tp = avg_price + target_pips
+            # Sanity check: If current price is already above avg, ensure TP is above current
+            if current_price > avg_price:
+                final_tp = max(final_tp, current_price + 0.05)
+        else:
+            final_tp = avg_price - target_pips
+            if current_price < avg_price:
+                final_tp = min(final_tp, current_price - 0.05)
+
+        return round(final_tp, 2)
+
     async def close_bucket_positions(self, broker, bucket_id: str, symbol: str) -> bool:
         """
         Close all positions in a bucket.

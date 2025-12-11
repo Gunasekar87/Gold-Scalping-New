@@ -92,9 +92,12 @@ class TradingEngine:
         # [PHASE 3] Initialize Supervisor and Workers
         from .ai_core.supervisor import Supervisor
         from .ai_core.workers import RangeWorker, TrendWorker
+        from .ai.hedge_intelligence import HedgeIntelligence # [NEW] The Oracle
+        
         self.supervisor = Supervisor()
         self.range_worker = RangeWorker()
         self.trend_worker = TrendWorker()
+        self.hedge_intel = HedgeIntelligence(self.config) # [NEW] Initialize Oracle
 
         # Async database components
         self.db_manager = db_manager
@@ -1463,10 +1466,40 @@ class TradingEngine:
                 )
                 
                 if should_hedge or stabilizer_triggered:
-                    # Calculate Intelligent Lot Size using correct pip_value
-                    recovery_dist_pips = (current_atr / props['point_size']) # Convert price delta to points
+                    # [AI INTELLIGENCE] Filter Strategic Hedges (IronShield)
+                    # We always allow Stabilizer (Emergency) hedges, but we filter Strategic ones.
+                    if should_hedge and not stabilizer_triggered:
+                        # Detect Regime
+                        regime_obj = self.supervisor.detect_regime(market_data)
+                        
+                        # Calculate Drawdown for AI
+                        current_drawdown = abs(bucket_pnl) # bucket_pnl is usually negative here
+                        
+                        # Ask The Oracle
+                        hedge_decision = self.hedge_intel.evaluate_hedge_opportunity(
+                            market_data,
+                            "buy" if last_pos.type == 0 else "sell", # Current position type
+                            current_drawdown,
+                            regime_obj.name
+                        )
+                        
+                        if not hedge_decision.should_hedge:
+                            logger.info(f"[AI] Skipping Strategic Hedge: {hedge_decision.reason}")
+                            # Skip this cycle, but don't return False (let other logic run)
+                            # We just reset should_hedge to False so we don't execute below
+                            should_hedge = False
                     
-                    hedge_lot = shield.calculate_recovery_lot_size(
+                    # Re-check if we still want to hedge (Stabilizer might still be True)
+                    if should_hedge or stabilizer_triggered:
+                        # Calculate Intelligent Lot Size using correct pip_value
+                        recovery_dist_pips = (current_atr / props['point_size']) # Convert price delta to points
+                        
+                        # [AI INTELLIGENCE] Dynamic Grid Step
+                        # If we are hedging, we might want to place it further away if volatility is high?
+                        # Actually, IronShield calculates the lot size.
+                        # We can adjust the 'recovery_dist_pips' if we wanted to widen the grid.
+                        
+                        hedge_lot = shield.calculate_recovery_lot_size(
                         positions=symbol_positions,
                         current_price=tick['bid'],
                         target_recovery_pips=recovery_dist_pips,
@@ -1489,7 +1522,18 @@ class TradingEngine:
                             if max_vol < 0.01:
                                 logger.critical(f"[MARGIN CALL] Cannot place hedge! Required: {hedge_lot}, Max Possible: {max_vol}. ABORTING HEDGE.")
                                 print(f">>> [CRITICAL] MARGIN CALL! Cannot place hedge. Account is over-leveraged.", flush=True)
-                                return False # Cannot hedge, let it ride (or close?)
+                                
+                                # [AI INTELLIGENCE] SHED WEIGHT
+                                # If we can't hedge, we MUST reduce exposure to survive.
+                                shed_candidates = self.hedge_intel.find_shedding_opportunity(symbol_positions)
+                                if shed_candidates:
+                                    logger.warning(f"[SURVIVAL] Shedding 2 trades to free margin...")
+                                    # Close the candidates
+                                    for pos in shed_candidates:
+                                        await self.broker.close_position(pos.ticket)
+                                    return True # We took action (shedding), so we are "done" for this tick
+                                
+                                return False # Cannot hedge, let it ride
                             else:
                                 logger.warning(f"[MARGIN WARNING] Capping hedge size from {hedge_lot} to {max_vol} due to margin constraints.")
                                 hedge_lot = max_vol
@@ -1534,6 +1578,12 @@ class TradingEngine:
                         comment="Elastic_Hedge"
                     )
                     elastic_hedge_triggered = True
+                    
+                    # [AI INTELLIGENCE] Update Bucket TP immediately
+                    # Now that we have a new hedge, the "Survival TP" changes.
+                    # We must update all trades in the bucket to the new target.
+                    if bucket_id:
+                        await self.position_manager.update_bucket_tp(symbol, bucket_id)
                     return True # Managed
 
             # If Elastic Defense didn't trigger a hedge, we still check for EXITS (TP/SL)

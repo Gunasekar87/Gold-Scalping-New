@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
 # [CRITICAL] Pre-load torch to prevent DLL loading hangs on Windows
-print(">>> [SYSTEM] Starting Aether Bot v5.0...", flush=True)
+print(">>> [SYSTEM] Starting Aether Bot v5.1 (Intelligence Upgrade)...", flush=True)
 print(">>> [SYSTEM] Pre-loading AI Libraries (Torch)...", flush=True)
 try:
     import torch

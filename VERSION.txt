@@ -1,4 +1,11 @@
-﻿v5.0 (MAJOR UPGRADE) - 2025-12-11
+﻿v5.1 (INTELLIGENCE UPGRADE) - 2025-12-11
+- [NEW] Hedge Intelligence (The Oracle): AI module to filter strategic hedges based on Regime/Trend.
+- [NEW] Zero-Latency Closing: Parallel execution for bucket exits (~200ms total latency).
+- [NEW] Smart Grid: Dynamic grid step calculation based on volatility.
+- [NEW] Margin Shedding: Auto-closes neutral pairs (Winner/Loser) to free margin during critical drawdowns.
+- [ENHANCED] Survival Mode: Tuned for >3 trades (Caution) and >5 trades (Emergency).
+
+v5.0 (MAJOR UPGRADE) - 2025-12-11
 - [NEW] Survival Mode: Dynamic TP reduction for heavy buckets to escape grid lock.
 - [FIX] Stability: Fixed PositionState.ACTIVE crash in position_manager.py.
 - [FIX] AI Core: Refactored architecture (Supervisor/Workers) and removed legacy modules.
