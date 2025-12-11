@@ -106,6 +106,11 @@ class MT5Adapter(BrokerAdapter):
         return tick.bid if tick else 0.0
 
     def get_tick(self, symbol: str) -> Dict:
+        # Ensure symbol is selected in Market Watch
+        if not mt5.symbol_select(symbol, True):
+            logger.warning(f"Failed to select symbol {symbol} in Market Watch")
+            return None
+            
         tick = mt5.symbol_info_tick(symbol)
         if tick:
             return {
@@ -227,6 +232,49 @@ class MT5Adapter(BrokerAdapter):
             "leverage": info.leverage
         } if info else {}
 
+    def check_margin(self, symbol: str, volume: float, order_type: str) -> bool:
+        """
+        Check if there is enough margin to execute the order.
+        """
+        mt5_type = mt5.ORDER_TYPE_BUY if order_type == "BUY" else mt5.ORDER_TYPE_SELL
+        price = mt5.symbol_info_tick(symbol).ask if mt5_type == mt5.ORDER_TYPE_BUY else mt5.symbol_info_tick(symbol).bid
+        
+        margin = mt5.order_calc_margin(mt5_type, symbol, volume, price)
+        if margin is None:
+            logger.error(f"Failed to calculate margin for {symbol} {volume} lots")
+            return False
+            
+        account_info = mt5.account_info()
+        if not account_info:
+            return False
+            
+        if account_info.margin_free < margin:
+            logger.warning(f"[MARGIN] Insufficient margin! Required: ${margin:.2f}, Free: ${account_info.margin_free:.2f}")
+            return False
+            
+        return True
+
+    def get_max_volume(self, symbol: str, order_type: str) -> float:
+        """
+        Calculate maximum volume allowed by free margin.
+        """
+        account_info = mt5.account_info()
+        if not account_info:
+            return 0.0
+            
+        free_margin = account_info.margin_free
+        mt5_type = mt5.ORDER_TYPE_BUY if order_type == "BUY" else mt5.ORDER_TYPE_SELL
+        price = mt5.symbol_info_tick(symbol).ask if mt5_type == mt5.ORDER_TYPE_BUY else mt5.symbol_info_tick(symbol).bid
+        
+        # Estimate margin for 1 lot
+        margin_1_lot = mt5.order_calc_margin(mt5_type, symbol, 1.0, price)
+        if not margin_1_lot:
+            return 0.0
+            
+        max_vol = free_margin / margin_1_lot
+        # Apply safety buffer (95% of max)
+        return max_vol * 0.95
+
     async def close_positions(self, positions_data: list) -> dict:
         """
         ZERO-LATENCY CLOSER: Accepts full position objects/dicts to skip the lookup step.
@@ -262,6 +310,14 @@ class MT5Adapter(BrokerAdapter):
                 
             price = tick.bid if order_type == mt5.ORDER_TYPE_SELL else tick.ask
 
+            # [OPTIMIZATION] Dynamic Deviation for Fast Closing
+            # Gold moves fast, so we need wider tolerance to avoid Requotes (Latency)
+            dev = 50
+            if "XAU" in symbol or "GOLD" in symbol:
+                dev = 500 # 50 pips tolerance for Gold (Priority: EXECUTION SPEED)
+            elif "JPY" in symbol:
+                dev = 100 # 10 pips for JPY pairs
+
             request = {
                 "action": mt5.TRADE_ACTION_DEAL,
                 "symbol": symbol,
@@ -269,9 +325,9 @@ class MT5Adapter(BrokerAdapter):
                 "type": order_type,
                 "position": ticket,
                 "price": price,
-                "deviation": 50,  # [CRITICAL] Allow 50 points (5 pips) slippage to ensure close
+                "deviation": dev,
                 "magic": magic,
-                "comment": "Aether ZeroLat",
+                "comment": "Aether FastClose",
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": mt5.ORDER_FILLING_IOC,
             }

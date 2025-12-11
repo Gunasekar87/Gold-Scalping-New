@@ -47,11 +47,7 @@ from .utils.news_filter import NewsFilter
 from .ai_core.nexus_brain import NexusBrain
 from .ai_core.ppo_guardian import PPOGuardian
 from .ai_core.iron_shield import IronShield
-from .ai_core.macro_sentinel import MacroSentinel
-from .ai_core.council import Council
 from .ai_core.strategist import Strategist
-from .ai_core.quantum_arbiter import QuantumArbiter
-from .ai_core.sentiment_engine import SentimentEngine
 from .infrastructure.database import get_database_manager
 from .infrastructure.supabase_adapter import SupabaseAdapter
 from .bridge.broker_factory import BrokerFactory
@@ -170,7 +166,7 @@ class AetherBot:
             # Initialize modular components
             logger.info("2. Initializing Market Data & Position Manager...")
             timeframe = self.config.get('trading', {}).get('timeframe', 'M1')
-            self.market_data = MarketDataManager(self.broker, timeframe)
+            self.market_data = MarketDataManager(self.broker, timeframe, self.config)
 
             self.position_manager = PositionManager()
             
@@ -191,11 +187,21 @@ class AetherBot:
                 tp_pips=self.config.get('risk', {}).get('zone_recovery', {}).get('tp_pips', 25)
             )
             self.risk_manager = RiskManager(zone_config)
+            
+            # [FIX] Initialize IronShield early and attach to RiskManager if needed
+            # Or better, just initialize it here so we can pass it to TradingEngine
+            self.shield = IronShield(
+                initial_lot=self.config['risk']['initial_lot'],
+                zone_pips=self.config['risk']['zone_recovery']['zone_pips'],
+                tp_pips=self.config['risk']['zone_recovery']['tp_pips']
+            )
+            # Attach shield to risk_manager if it expects it (based on error log)
+            self.risk_manager.shield = self.shield
 
             trading_config = TradingConfig(
                 symbol=self.config.get('trading', {}).get('symbol', 'EURUSD'),
                 initial_lot=self.config.get('risk', {}).get('initial_lot', 0.01),
-                global_trade_cooldown=15.0,
+                global_trade_cooldown=5.0, # Reduced for Continuous Scalping
                 timeframe=self.config.get('trading', {}).get('timeframe', 'M1')
             )
 
@@ -206,26 +212,43 @@ class AetherBot:
             logger.info("5. Initializing AI Core (This is the heavy part)...")
             
             # Initialize AI components needed for TradingEngine
+            print(">>> [INIT] Loading PPO Guardian (Reinforcement Learning)...", flush=True)
             self.ppo_guardian = PPOGuardian()
+            print(">>> [INIT] PPO Guardian Online.", flush=True)
             
             # Initialize Global Brain (Layer 9)
+            print(">>> [INIT] Loading Global Brain (Macro Analysis)...", flush=True)
             from .ai_core.global_brain import GlobalBrain
             self.global_brain = GlobalBrain(self.market_data)
+            print(">>> [INIT] Global Brain Online.", flush=True)
 
+            # Initialize Oracle (Layer 4)
+            print(">>> [INIT] Loading Oracle (Price Prediction)...", flush=True)
+            self.oracle = Oracle()
+            print(">>> [INIT] Oracle Online.", flush=True)
+
+            print(">>> [INIT] Starting Trading Engine...", flush=True)
             self.trading_engine = TradingEngine(trading_config, self.broker, self.market_data,
                                               self.position_manager, self.risk_manager, db_manager, self.ppo_guardian, self.global_brain)
+            print(">>> [INIT] Trading Engine Ready.", flush=True)
 
             # Initialize database components
+            print(">>> [INIT] Initializing Database...", flush=True)
             await self.trading_engine.initialize_database()
+            print(">>> [INIT] Database Initialized.", flush=True)
 
             # Initialize legacy components (temporary)
             logger.info("6. Finalizing Setup...")
+            print(">>> [INIT] Initializing Legacy Components...", flush=True)
             self._initialize_legacy_components()
+            print(">>> [INIT] Legacy Components Initialized.", flush=True)
 
             logger.info("[OK] All components initialized successfully")
             return True
 
         except Exception as e:
+            import sys
+            sys.stderr.write(f"INIT ERROR: {e}\n")
             logger.error(f"Component initialization failed: {e}")
             return False
 
@@ -263,18 +286,8 @@ class AetherBot:
         # self.ppo_guardian is already initialized in initialize_components
 
         # Risk and Strategy
-        self.shield = IronShield(
-            initial_lot=self.config['risk']['initial_lot'],
-            zone_pips=self.config['risk']['zone_recovery']['zone_pips'],
-            tp_pips=self.config['risk']['zone_recovery']['tp_pips']
-        )
+        # self.shield is already initialized in initialize_components
         self.strategist = Strategist()
-
-        # Council and Analysis
-        sentinel = MacroSentinel()
-        quantum = QuantumArbiter()
-        sentiment = SentimentEngine()
-        self.council = Council(self.nexus, sentinel, self.shield, quantum, sentiment)
 
         # Infrastructure
         self.memory_db = get_database_manager(self.config.get('database'))
@@ -305,10 +318,18 @@ class AetherBot:
         self.running = True
 
         logger.info("[INFO] AETHER Trading System Online")
+        print(">>> [SYSTEM] Bot is Running. Waiting for market data...", flush=True)
         logger.info("=" * 50)
 
         try:
+            print(">>> [DEBUG] Entering Main Loop...", flush=True)
+            last_heartbeat = time.time()
             while not self.shutdown_requested:
+                # Heartbeat every 10 seconds
+                if time.time() - last_heartbeat > 10.0:
+                    print(f">>> [SYSTEM] Heartbeat - Bot is alive. Time: {time.strftime('%H:%M:%S')}", flush=True)
+                    last_heartbeat = time.time()
+
                 await self._run_trading_cycle()
 
                 # Adaptive sleep: Balanced latency for active positions
@@ -355,13 +376,14 @@ class AetherBot:
             logger.debug("[SUCCESS] TRADING CYCLE COMPLETED")
 
         except Exception as e:
+            print(f">>> [ERROR] Cycle Error: {e}", flush=True)
             logger.error(f"[FAIL] TRADING CYCLE ERROR: {e}")
 
     async def _execute_trading_strategy(self) -> None:
         """Execute trading strategy for new entries."""
         # Use the new trading engine
         await self.trading_engine.run_trading_cycle(
-            self.council, self.strategist, self.shield, self.ppo_guardian, self.nexus
+            self.strategist, self.shield, self.ppo_guardian, self.nexus, self.oracle
         )
 
     async def _update_dashboard(self) -> None:

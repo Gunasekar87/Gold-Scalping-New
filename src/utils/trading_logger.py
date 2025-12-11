@@ -55,6 +55,34 @@ class TradingLogger:
         msg.append(f"AI Analysis: {data['reasoning']}")
         
         logger.info("\n".join(msg))
+
+    @staticmethod
+    def log_active_status(symbol: str, bucket_id: str, positions: List[Dict], pnl_pips: float, tp_pips: float, next_hedge: Optional[Dict] = None, ai_notes: str = ""):
+        """
+        Log the ongoing status of an active bucket (Dashboard style)
+        """
+        # Calculate aggregate stats
+        total_lots = sum(p.get('volume', 0) for p in positions)
+        net_profit = sum(p.get('profit', 0) for p in positions)
+        
+        # Determine direction of the main/latest position
+        direction = "MIXED"
+        if positions:
+            last_pos = positions[-1]
+            direction = "BUY" if last_pos.get('type') == 0 else "SELL"
+            
+        msg = []
+        msg.append(f">>> [STATUS] {symbol} | {direction} | Lots: {total_lots:.2f} | PnL: {net_profit:.2f} USD ({pnl_pips:.1f} pips)")
+        msg.append(f"             Target: +{tp_pips:.1f} pips | Bucket: {bucket_id}")
+        
+        if next_hedge:
+            msg.append(f"             Next Hedge: {next_hedge.get('type')} {next_hedge.get('lots')} lots @ {next_hedge.get('price'):.5f}")
+            
+        if ai_notes:
+            msg.append(f"             AI View: {ai_notes}")
+            
+        # Use print for immediate console feedback (Dashboard feel)
+        print("\n".join(msg), flush=True)
     
     @staticmethod
     def log_trade_close(symbol: str, exit_reason: str, duration: float, pnl_usd: float, pnl_pips: float, positions_closed: int, ai_analysis: Dict):

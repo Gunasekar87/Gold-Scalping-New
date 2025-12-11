@@ -9,10 +9,13 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
 # [CRITICAL] Pre-load torch to prevent DLL loading hangs on Windows
-print("Initializing AI Core (this may take a moment)...")
+print(">>> [SYSTEM] Starting Aether Bot v5.0...", flush=True)
+print(">>> [SYSTEM] Pre-loading AI Libraries (Torch)...", flush=True)
 try:
     import torch
+    print(">>> [SYSTEM] AI Libraries Loaded.", flush=True)
 except ImportError:
+    print(">>> [WARN] Torch not found.", flush=True)
     pass
 
 # Force UTF-8 encoding for stdout and stderr to handle emojis on Windows
@@ -131,6 +134,10 @@ logging.basicConfig(
     handlers=[file_handler] # Remove console_handler from root to silence terminal
 )
 
+# [FIX] Ensure warnings/errors from ANY module are printed to console
+console_handler.setLevel(logging.WARNING)
+logging.getLogger().addHandler(console_handler)
+
 # Configure UI Logger - This one gets the console
 ui_logger = logging.getLogger("AETHER_UI")
 ui_logger.setLevel(logging.INFO)
@@ -248,5 +255,9 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("Bot execution interrupted by user")
     except Exception as e:
+        import traceback
+        sys.stderr.write(f"CRITICAL ERROR: {e}\n")
+        traceback.print_exc()
+        sys.stderr.flush()
         logger.error(f"Unexpected error: {e}")
         sys.exit(1)

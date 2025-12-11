@@ -23,7 +23,7 @@ except ImportError as e:
     class spaces:
         Box = None
 
-# [PATCH] Fix for FloatSchedule deserialization error in newer SB3 versions
+# [PATCH] Fix for FloatSchedule/ConstantSchedule deserialization error in newer SB3 versions
 # This restores the missing class so old models can load without warnings
 try:
     import stable_baselines3.common.utils
@@ -34,6 +34,14 @@ try:
             def __call__(self, progress):
                 return self.start_value
         stable_baselines3.common.utils.FloatSchedule = FloatSchedule
+        
+    if not hasattr(stable_baselines3.common.utils, 'ConstantSchedule'):
+        class ConstantSchedule:
+            def __init__(self, value):
+                self.value = value
+            def __call__(self, progress):
+                return self.value
+        stable_baselines3.common.utils.ConstantSchedule = ConstantSchedule
 except (ImportError, AttributeError):
     pass
 
@@ -101,12 +109,12 @@ class PPOGuardian:
                 self.model = PPO.load(model_path, env=self.env)
             except ValueError as e:
                 if "Observation spaces do not match" in str(e):
-                    logger.warning("⚠️ Brain Upgrade Detected (3 inputs -> 4 inputs). Resetting PPO Brain to adapt to Hive Mind...")
+                    logger.warning("[BRAIN UPGRADE] 3 inputs -> 4 inputs. Resetting PPO Brain to adapt to Hive Mind...")
                     # Delete old model and start fresh
                     os.remove(model_path)
                     self.model = PPO("MlpPolicy", self.env, verbose=1)
                     self.model.save(model_path)
-                    logger.info("✅ Brain Reset Complete. New Hive Mind Architecture Active.")
+                    logger.info("[BRAIN RESET] New Hive Mind Architecture Active.")
                 else:
                     raise e
         else:
@@ -277,12 +285,12 @@ class PPOGuardian:
             
             # 3. Log the Shift
             change_msg = (
-                f"✅ EVOLUTION COMPLETE. Learning Impact:\n"
+                f"[EVOLUTION COMPLETE] Learning Impact:\n"
                 f"   --------------------------------------------------\n"
                 f"   [SCENARIO: High Volatility & Drawdown]\n"
-                f"   • Previous Policy: Hedge Mult {action_before[0]:.2f} | Zone Mod {action_before[1]:.2f}\n"
-                f"   • New Policy:      Hedge Mult {action_after[0]:.2f} | Zone Mod {action_after[1]:.2f}\n"
-                f"   • Interpretation:  AI has become {'More Aggressive' if action_after[0] > action_before[0] else 'More Conservative'} "
+                f"   * Previous Policy: Hedge Mult {action_before[0]:.2f} | Zone Mod {action_before[1]:.2f}\n"
+                f"   * New Policy:      Hedge Mult {action_after[0]:.2f} | Zone Mod {action_after[1]:.2f}\n"
+                f"   * Interpretation:  AI has become {'More Aggressive' if action_after[0] > action_before[0] else 'More Conservative'} "
                 f"and {'Widened' if action_after[1] > action_before[1] else 'Tightened'} Zones.\n"
                 f"   --------------------------------------------------"
             )
@@ -475,7 +483,7 @@ class PPOGuardian:
         Intensive Offline Training (Dream Mode).
         Replays memory multiple times to reinforce learning when the market is closed.
         """
-        logger.info("💤 Entering Dream Mode (Deep Offline Learning)...")
+        logger.info("[DREAM MODE] Entering Deep Offline Learning...")
         if not os.path.exists(self.memory_file):
             logger.warning("No memory to dream on.")
             return
@@ -497,6 +505,6 @@ class PPOGuardian:
         try:
             self.model.learn(total_timesteps=len(memory) * epochs)
             self.model.save(self.model_path)
-            logger.info(f"✨ Dream Mode Complete. Processed {len(memory) * epochs} simulated scenarios.")
+            logger.info(f"[DREAM MODE] Complete. Processed {len(memory) * epochs} simulated scenarios.")
         except Exception as e:
             logger.error(f"Dream Mode Interrupted: {e}")

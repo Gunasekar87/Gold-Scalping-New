@@ -35,7 +35,7 @@ class NewsFilter:
         
         # Block 13:25 - 13:35 UTC (US Open)
         if 13.41 <= current_hour <= 13.58:
-            # logger.info("📰 NEWS: US Market Open Volatility Window")
+            # logger.info("[NEWS] US Market Open Volatility Window")
             return True
             
         return False

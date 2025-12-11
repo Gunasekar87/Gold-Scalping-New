@@ -234,6 +234,68 @@ class PositionManager:
         except Exception as e:
             logger.error(f"Failed to save position state: {e}")
 
+    def calculate_bucket_drawdown(self, bucket_id: str, market_data: Dict) -> float:
+        """
+        [PHASE 2] Calculates current drawdown for a bucket in USD.
+        Used by 'The Stabilizer' to trigger hedging.
+        """
+        if bucket_id not in self.bucket_stats:
+            return 0.0
+            
+        stats = self.bucket_stats[bucket_id]
+        positions = [self.active_positions[t] for t in stats.positions if t in self.active_positions]
+        
+        if not positions:
+            return 0.0
+            
+        # Calculate Net PnL
+        net_pnl, _, _, _ = self.calculate_net_pnl(positions)
+        
+        # Drawdown is negative PnL
+        if net_pnl < 0:
+            return abs(net_pnl)
+        return 0.0
+
+    def check_stabilizer_trigger(self, bucket_id: str, market_data: Dict) -> bool:
+        """
+        [PHASE 2] The Stabilizer: Checks if hedging is needed.
+        Trigger: Drawdown > 1.5 * ATR_Value_USD
+        """
+        if bucket_id not in self.bucket_stats:
+            return False
+            
+        stats = self.bucket_stats[bucket_id]
+        
+        # Only trigger if we are in SINGLE mode (don't hedge a hedge)
+        if stats.mode != BucketMode.SINGLE:
+            return False
+            
+        positions = [self.active_positions[t] for t in stats.positions if t in self.active_positions]
+        if not positions:
+            return False
+            
+        # Calculate Drawdown
+        drawdown = self.calculate_bucket_drawdown(bucket_id, market_data)
+        
+        # Calculate Threshold (1.5 * ATR in USD)
+        atr_value = market_data.get('atr', 0.0010)
+        total_volume = sum(p.volume for p in positions)
+        symbol = positions[0].symbol
+        
+        # Contract Size
+        contract_size = 100 if "XAU" in symbol or "GOLD" in symbol else 100000
+        
+        # ATR in USD = ATR_Price * Contract_Size * Volume
+        atr_usd = atr_value * contract_size * total_volume
+        
+        threshold = atr_usd * 1.5
+        
+        if drawdown > threshold:
+            logger.warning(f"[STABILIZER] Triggered! Drawdown ${drawdown:.2f} > Threshold ${threshold:.2f} (1.5x ATR)")
+            return True
+            
+        return False
+
     def record_trade_metadata(self, ticket: int, metadata: Dict) -> None:
         """
         Thread-safe method to record trade metadata and persist state.
@@ -377,10 +439,10 @@ class PositionManager:
             else:
                 try:
                     msg = (
-                        f"\n🛡️ ---------------- HEDGE ACTIVATED ---------------- 🛡️\n"
-                        f"⚠️ Parent:   #{hedge_ticket}\n"
-                        f"🧱 Type:     {position_type} (Survival Mode)\n"
-                        f"🎯 Goal:     Break-even recovery\n"
+                        f"\n[HEDGE ACTIVATED]\n"
+                        f"Parent:   #{hedge_ticket}\n"
+                        f"Type:     {position_type} (Survival Mode)\n"
+                        f"Goal:     Break-even recovery\n"
                         f"----------------------------------------------------"
                     )
                     ui_logger.info(msg)
@@ -848,8 +910,41 @@ class PositionManager:
             # Calculate precise metrics
             current_price = first_pos.price_current
             entry_price = first_pos.price_open
-            price_movement = current_price - entry_price
-            movement_pips = abs(price_movement) * pip_multiplier  # Accurate pips calculation
+            
+            # [PHASE 2] GHOST PROTOCOL: Predictive Exit
+            # Logic: If Profit > 80% of Target AND Momentum Drops -> CLOSE
+            ghost_exit = False
+            ghost_reason = ""
+            
+            # Calculate current profit in pips
+            if first_pos.is_buy:
+                current_pips = (current_price - entry_price) * pip_multiplier
+            else:
+                current_pips = (entry_price - current_price) * pip_multiplier
+                
+            # Get Target Pips (from metadata or default)
+            target_pips = first_pos.entry_tp_pips if first_pos.entry_tp_pips > 0 else (atr_value * pip_multiplier * 0.3)
+            
+            if target_pips > 0 and current_pips > (target_pips * 0.8):
+                # Check Momentum (OBI or RSI)
+                obi = market_data.get('obi', 0.0) if market_data else 0.0
+                rsi = market_data.get('rsi', 50.0) if market_data else 50.0
+                
+                # If BUY and Momentum Fades
+                if first_pos.is_buy:
+                    if obi < -0.2 or rsi > 70: # Sell Pressure or Overbought
+                        ghost_exit = True
+                        ghost_reason = f"Ghost Protocol (OBI={obi:.2f}, RSI={rsi:.1f})"
+                # If SELL and Momentum Fades
+                elif first_pos.is_sell:
+                    if obi > 0.2 or rsi < 30: # Buy Pressure or Oversold
+                        ghost_exit = True
+                        ghost_reason = f"Ghost Protocol (OBI={obi:.2f}, RSI={rsi:.1f})"
+            
+            if ghost_exit:
+                logger.info(f"[GHOST PROTOCOL] Triggered! {ghost_reason} | Profit: {current_pips:.1f}/{target_pips:.1f} pips")
+                stats.exit_reason = "GHOST_PROTOCOL"
+                return True, 1.0
 
             # Use STORED TP/SL from entry time (fixed targets, not recalculated)
             # If not set, fall back to current ATR calculation (for old positions)
@@ -881,6 +976,13 @@ class PositionManager:
             # Position P&L calculation
             volume = first_pos.volume
             pip_value = 0.0001  # For XAUUSD (adjust for other pairs)
+            
+            # [FIX] Define price_movement before usage
+            if first_pos.is_buy:
+                price_movement = current_price - entry_price
+            else:
+                price_movement = entry_price - current_price
+                
             current_pnl = price_movement * volume * 10000 * pip_value
 
             # === FUTURISTIC AI EXIT CRITERIA ===
@@ -945,6 +1047,7 @@ class PositionManager:
                 # BUCKET: Use DYNAMIC BREAK-EVEN LOGIC
                 total_profit_usd = sum(pos.profit for pos in positions)
                 total_volume = sum(pos.volume for pos in positions)
+                num_trades = len(positions)
                 
                 # INTELLIGENCE UPGRADE: Use Velvet Cushion Protocol
                 # Calculate dynamic target based on Spread, Volume, and Volatility
@@ -955,7 +1058,7 @@ class PositionManager:
                 pip_value = 1.0 if "XAU" in first_pos.symbol or "GOLD" in first_pos.symbol else 10.0
                 
                 # Pass raw spread_pips (e.g. 20 for Gold) and correct pip_value
-                target_profit_usd = self.calculate_bucket_target_usd(
+                base_target_usd = self.calculate_bucket_target_usd(
                     spread_pips, 
                     total_volume, 
                     volatility_ratio, 
@@ -963,26 +1066,20 @@ class PositionManager:
                     pip_value=pip_value
                 )
                 
-                # --- SURVIVAL PROTOCOL OVERRIDE ---
-                if is_survival_mode:
-                    # EMERGENCY EXIT LOGIC: Just cover the spread and get out.
-                    
-                    # Calculate raw spread cost (1.0x, not 1.5x)
-                    raw_spread_cost = total_volume * pip_value * spread_pips
-                    
-                    # INTELLIGENT BUFFER CALCULATION
-                    # Base Buffer: 0.5 pips worth of value
-                    base_buffer_usd = total_volume * pip_value * 0.5
-                    
-                    # Adjust for Volatility
-                    vol_multiplier = max(0.5, min(volatility_ratio, 2.0))
-                    
-                    dynamic_buffer = base_buffer_usd * vol_multiplier
-                    
-                    # Target = Spread Cost + Dynamic Buffer
-                    target_profit_usd = raw_spread_cost + dynamic_buffer
-                    
-                    logger.info(f"[SURVIVAL] Hedge 3+ Active! Target SLASHED to ${target_profit_usd:.2f} (Spread: ${raw_spread_cost:.2f} + Buffer: ${dynamic_buffer:.2f})")
+                # --- SURVIVAL MODE LOGIC (User Requested) ---
+                # 1 Trade: Normal Target (Handled in 'if' block above)
+                # 2 Trades: 50% Target
+                # 3+ Trades: Survival Mode (Just cover costs + $1)
+                
+                if num_trades == 2:
+                    target_profit_usd = base_target_usd * 0.5
+                    logger.info(f"[SURVIVAL] 2 Trades Active. Target reduced to 50%: ${target_profit_usd:.2f}")
+                elif num_trades >= 3:
+                    # Survival Mode: Just cover costs + small profit ($5.00)
+                    target_profit_usd = 5.0
+                    logger.info(f"[SURVIVAL] 3+ Trades Active! Target SLASHED to $5.00 (Survival Mode)")
+                else:
+                    target_profit_usd = base_target_usd
 
                 # For hedged positions, we want AT LEAST break-even + dynamic profit
                 # [ENHANCEMENT] Use True Net PnL (Profit + Swap + Commission)
@@ -1025,7 +1122,7 @@ class PositionManager:
                 if current_high >= (effective_target * 0.8) and net_pnl <= (effective_target * 0.5):
                     if net_pnl > 1.0: # Ensure we are still profitable
                         ratchet_exit = True
-                        ratchet_reason = f"📉 RATCHET PROTECT: Peak ${current_high:.2f} -> Now ${net_pnl:.2f}"
+                        ratchet_reason = f"[RATCHET PROTECT] Peak ${current_high:.2f} -> Now ${net_pnl:.2f}"
                         status_msg += " [RATCHET]"
 
                 # Rule B: The "Breakeven Assist" (50% -> 10%)
@@ -1033,7 +1130,7 @@ class PositionManager:
                 elif current_high >= (effective_target * 0.5) and net_pnl <= (effective_target * 0.1):
                     if net_pnl > 0.50: # Ensure positive
                         ratchet_exit = True
-                        ratchet_reason = f"🛡️ BE DEFENSE: Peak ${current_high:.2f} -> Now ${net_pnl:.2f}"
+                        ratchet_reason = f"[BE DEFENSE] Peak ${current_high:.2f} -> Now ${net_pnl:.2f}"
                         status_msg += " [DEFENSE]"
 
                 profit_exit = (net_pnl >= effective_target) or ratchet_exit
@@ -1194,23 +1291,61 @@ class PositionManager:
         # Wait for the close to complete
         close_results = await close_task
         
-        # [CRITICAL FIX] Verify Close Results
+        # [CRITICAL FIX] Verify Close Results & Retry Failed
         successful_closes = 0
-        failed_closes = []
+        failed_tickets = []
         
         for ticket, result in close_results.items():
             if result.get('retcode') == 10009: # TRADE_RETCODE_DONE
                 successful_closes += 1
             else:
-                failed_closes.append(f"{ticket}: {result.get('comment')} ({result.get('retcode')})")
+                failed_tickets.append(ticket)
+                logger.warning(f"[CLOSE RETRY] Ticket {ticket} failed: {result.get('comment')} ({result.get('retcode')})")
         
-        if failed_closes:
-            logger.error(f"⚠️ PARTIAL/FULL CLOSE FAILURE in Bucket {bucket_id}: {failed_closes}")
+        # RETRY LOOP for failed tickets
+        if failed_tickets:
+            logger.info(f"[CLOSE RETRY] Attempting to close {len(failed_tickets)} failed positions...")
+            # Get position objects for failed tickets
+            retry_positions = [self.active_positions[t] for t in failed_tickets if t in self.active_positions]
             
+            if retry_positions:
+                # Retry once with high priority
+                retry_results = await broker.close_positions(retry_positions)
+                
+                for ticket, result in retry_results.items():
+                    if result.get('retcode') == 10009:
+                        successful_closes += 1
+                        # Remove from failed list
+                        if ticket in failed_tickets:
+                            failed_tickets.remove(ticket)
+                        logger.info(f"[CLOSE RETRY] Success: Closed {ticket}")
+                    else:
+                        logger.error(f"[CLOSE FINAL FAIL] Ticket {ticket}: {result.get('comment')}")
+
+        if failed_tickets:
+            logger.error(f"[CLOSE FAILURE] Bucket {bucket_id}: {len(failed_tickets)} positions remained open.")
+            
+            # PARTIAL CLOSE HANDLING
+            # 1. Remove successful tickets from the bucket
+            # 2. Keep bucket ACTIVE so it manages the remaining ones
+            
+            # Identify successful tickets
+            all_tickets = [p.ticket for p in positions]
+            closed_tickets = [t for t in all_tickets if t not in failed_tickets]
+            
+            with self._lock:
+                # Update bucket positions list
+                stats.positions = [t for t in stats.positions if t in failed_tickets]
+                # Reset state to ACTIVE so we keep managing the leftovers
+                self._set_position_state(bucket_id, PositionState.BUCKET_ACTIVE)
+                
+            logger.warning(f"[PARTIAL CLOSE] Bucket {bucket_id} kept ACTIVE with {len(stats.positions)} positions.")
+            return False # Signal that we are NOT fully done
+
         if successful_closes == 0:
-            logger.error(f"❌ FAILED TO CLOSE ANY POSITIONS in Bucket {bucket_id}. Aborting summary.")
+            logger.error(f"[CLOSE FAILURE] FAILED TO CLOSE ANY POSITIONS in Bucket {bucket_id}. Aborting summary.")
             # Reset state to ACTIVE so we retry later
-            self._set_position_state(bucket_id, PositionState.ACTIVE)
+            self._set_position_state(bucket_id, PositionState.BUCKET_ACTIVE)
             return False
 
         # [ADD THIS] --- VISUAL BUCKET CLOSE SUMMARY ---
@@ -1233,14 +1368,17 @@ class PositionManager:
 
         exit_reason = stats.exit_reason if stats.exit_reason else "PROFIT"
         
+        # Enhanced Summary
         msg = (
-            f"\n💰 ================= EXIT SUMMARY ================= 💰\n"
-            f"🆔 Symbol:          {symbol}\n"
-            f"🏁 Exit Reason:     {exit_reason}\n"
-            f"⏱️ Duration:        {duration_str}\n"
-            f"💵 Total PnL:       ${total_pnl:.2f} ({total_pips:+.1f} pips)\n"
-            f"📦 Positions Closed: {successful_closes}/{len(positions)}\n"
-            f"📝 Explanation:     Closed {successful_closes} position(s) after {bucket_duration/60:.1f} minutes. {exit_reason} target achieved.\n"
+            f"\n================= EXIT SUMMARY =================\n"
+            f"Symbol:          {symbol}\n"
+            f"Exit Reason:     {exit_reason}\n"
+            f"Duration:        {duration_str}\n"
+            f"Total PnL:       ${total_pnl:.2f} ({total_pips:+.1f} pips)\n"
+            f"Positions Closed: {successful_closes}/{len(positions)}\n"
+            f"Volume:          {total_volume:.2f} lots\n"
+            f"Explanation:     Closed {successful_closes} position(s) after {bucket_duration/60:.1f} minutes.\n"
+            f"                 Target '{exit_reason}' achieved.\n"
             f"===================================================="
         )
         
@@ -1252,7 +1390,9 @@ class PositionManager:
             f"Duration:        {duration_str}\n"
             f"Total PnL:       ${total_pnl:.2f} ({total_pips:+.1f} pips)\n"
             f"Positions Closed: {successful_closes}/{len(positions)}\n"
-            f"Explanation:     Closed {successful_closes} position(s) after {bucket_duration/60:.1f} minutes. {exit_reason} target achieved.\n"
+            f"Volume:          {total_volume:.2f} lots\n"
+            f"Explanation:     Closed {successful_closes} position(s) after {bucket_duration/60:.1f} minutes.\n"
+            f"                 Target '{exit_reason}' achieved.\n"
             f"===================================================="
         )
         

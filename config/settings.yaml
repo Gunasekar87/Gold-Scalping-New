@@ -10,6 +10,12 @@ trading:
   magic_number: 888888
   max_slippage: 5
 
+  # [NEW] Correlation Assets for Phase 1
+  correlations:
+    usd_proxy: "USDJPY"   # Proxy for DXY (Dollar Strength)
+    risk_proxy: "US500"   # Proxy for S&P500 (Risk Sentiment)
+    enable_correlation: true
+
 risk:
   global_risk_percent: 2.0
   max_drawdown_percent: 10.0

@@ -63,7 +63,7 @@ class TradingConfig:
     initial_lot: float
     max_lot: float = 100.0
     min_lot: float = 0.01
-    global_trade_cooldown: float = 15.0  # seconds
+    global_trade_cooldown: float = 5.0  # Reduced from 15.0s for Continuous Scalping
     max_spread_pips: float = 30.0
     risk_multiplier_range: Tuple[float, float] = (0.1, 2.0)
     timeframe: str = "M1"
@@ -89,8 +89,18 @@ class TradingEngine:
         self.ppo_guardian = ppo_guardian
         self.global_brain = global_brain # Layer 9: Inter-Market Correlation
 
+        # [PHASE 3] Initialize Supervisor and Workers
+        from .ai_core.supervisor import Supervisor
+        from .ai_core.workers import RangeWorker, TrendWorker
+        self.supervisor = Supervisor()
+        self.range_worker = RangeWorker()
+        self.trend_worker = TrendWorker()
+
         # Async database components
         self.db_manager = db_manager
+        
+        # Decision Tracker
+        self.decision_tracker = DecisionTracker()
         self.db_queue: Optional[AsyncDatabaseQueue] = None
 
         # Rate limiting
@@ -164,81 +174,6 @@ class TradingEngine:
 
         # Check market data manager conditions
         return self.market_data.validate_market_conditions(symbol, tick)
-
-    def generate_trade_signal(self, symbol: str, council, market_data: Dict, decision_tracker=None) -> Optional[TradeSignal]:
-        """
-        Generate a trade signal using the AI council.
-
-        Args:
-            symbol: Trading symbol
-            council: Council instance for decision making
-            market_data: Dictionary containing market data
-            decision_tracker: Optional DecisionTracker for change detection
-
-        Returns:
-            TradeSignal or None if no signal
-        """
-        try:
-            # Extract required data
-            history = market_data.get('history', [])
-            nexus_candles = market_data.get('nexus_candles', [])
-            full_candles = market_data.get('full_candles', [])
-            account_info = market_data.get('account_info', {})
-            macro_slope = market_data.get('macro_slope', 0.0)
-            sentiment_score = market_data.get('sentiment_score', 0.0)
-
-            if len(history) < 64:
-                return None
-
-            # Get council decision
-            decision, reason, metadata = council.deliberate(
-                symbol, history, nexus_candles, full_candles,
-                account_info.get('equity', 0),
-                account_info.get('balance', 0),
-                macro_slope, "NEUTRAL", sentiment_score  # quantum_signal placeholder
-            )
-
-            # === SIMPLIFIED AI DECISION LOGGING ===
-            # Only log actionable decisions (BUY/SELL) with minimal context
-            # HOLD decisions are silent to prevent log spam
-            
-            # Decision Validation
-            if decision not in ["BUY", "SELL", "HOLD"]:
-                logger.warning(f"[INVALID] Decision: {decision} | AI System Check Required")
-                return None
-
-            if decision == "HOLD":
-                # Silent HOLD - no log spam
-                # [DEBUG] Log HOLD reason to debug no-trade issue
-                if "Insufficient" not in reason: # Filter out data loading noise
-                     logger.info(f"[DEBUG] HOLD Reason: {reason}")
-                return None
-
-            # Signal Generation Intelligence
-            action = TradeAction.BUY if decision == "BUY" else TradeAction.SELL
-            confidence = metadata.get("nexus_confidence", 0.5)
-
-            # Only log signal if it changed from last decision (reduces repetitive logs)
-            should_log, change_reason = self.decision_tracker.should_log_decision(
-                symbol,
-                {'action': action.value, 'confidence': confidence, 'reasoning': reason}
-            )
-            self._last_signal_logged = should_log
-            if should_log:
-                logger.info(f"[SIGNAL] {action.value} {symbol} | Confidence: {confidence:.3f} | Reason: {reason}")
-
-            return TradeSignal(
-                action=action,
-                symbol=symbol,
-                confidence=confidence,
-                reason=reason,
-                metadata=metadata,
-                timestamp=time.time()
-            )
-
-        except Exception as e:
-            logger.error(f"Error generating trade signal: {e}")
-            return None
 
     def calculate_position_size(self, signal: TradeSignal, account_info: Dict,
                               strategist, shield, ppo_guardian=None, 
@@ -437,6 +372,7 @@ class TradingEngine:
             market_status = signal.metadata.get('market_status', 'Unknown')
             caution_factor = signal.metadata.get('caution_factor', 1.0)
             sentiment = signal.metadata.get('sentiment_score', 0.0)
+            regime_name = signal.metadata.get('regime', 'UNKNOWN')
 
             # Determine entry price and order type
             if signal.action == TradeAction.BUY:
@@ -556,6 +492,12 @@ class TradingEngine:
                 # Comprehensive AI decision factors and execution intelligence
                 symbol = signal.symbol
                 atr_value = self.market_data.calculate_atr(symbol, 14) if hasattr(self.market_data, 'calculate_atr') else 0.0010
+                
+                # [PHASE 3] Get Regime from Supervisor
+                regime_name = "UNKNOWN"
+                if hasattr(self, 'supervisor'):
+                    regime = self.supervisor.detect_regime(self.market_data.get_tick_data(symbol))
+                    regime_name = regime.name
                 
                 # Convert ATR to pips based on symbol type
                 if "JPY" in symbol or "XAU" in symbol:
@@ -750,7 +692,7 @@ class TradingEngine:
                     'tp_pips': tp_pips_entry,
                     'hedges': projected_hedges,
                     'atr_pips': atr_pips,
-                    'reasoning': signal.reason
+                    'reasoning': f"[{regime_name}] {signal.reason}"
                 })
 
                 # === STRUCTURED TRADING PLAN LOG ===
@@ -873,9 +815,9 @@ class TradingEngine:
             'point': point  # Point value for pip calculations
         }
 
-        # Periodic position status update (every 20 seconds) to show AI is monitoring
+        # Periodic position status update (every 5 seconds) to show AI is monitoring
         current_time = time.time()
-        if current_time - self._last_position_status_time >= 20.0:
+        if current_time - self._last_position_status_time >= 5.0:
             self._last_position_status_time = current_time
             first_pos = positions[0]
             entry_price = first_pos.get('price_open', 0)
@@ -888,6 +830,7 @@ class TradingEngine:
             # Check for stored TP in metadata
             tp_pips = atr_pips * 0.3  # Default dynamic TP
             tp_source = "Dynamic 0.3 ATR"
+            next_hedge_info = None
             
             try:
                 ticket = first_pos.get('ticket') if isinstance(first_pos, dict) else first_pos.ticket
@@ -897,6 +840,16 @@ class TradingEngine:
                     if stored_tp > 0:
                         tp_pips = stored_tp
                         tp_source = "Stored"
+                        
+                    # Extract Next Hedge Info
+                    hedge_plan = metadata.get('hedge_plan', {})
+                    pos_count = len(positions)
+                    if pos_count < 5: # Max 4 hedges
+                        next_hedge_key = f"hedge{pos_count}" # e.g. hedge1 if 1 pos exists
+                        trigger_price = hedge_plan.get(f"{next_hedge_key}_trigger_price")
+                        lots = hedge_plan.get(f"{next_hedge_key}_lots")
+                        if trigger_price:
+                             next_hedge_info = {'price': trigger_price, 'lots': lots, 'type': 'PENDING'}
             except Exception:
                 pass
             
@@ -906,8 +859,10 @@ class TradingEngine:
             else:  # SELL
                 pnl_pips = (entry_price - current_price) * pip_multiplier
             
-            # Changed to INFO to show position monitoring every 20 seconds
-            logger.info(f"[POSITION] MONITORING: P&L: {pnl_pips:.1f} pips | TP Target: {tp_pips:.1f} pips ({tp_source}) | AI checking exit conditions...")
+            # Use new Dashboard Logger
+            ai_notes = f"RSI {rsi_value:.1f}"
+            # [USER REQUEST] Disabled floating logs to reduce noise
+            # TradingLogger.log_active_status(symbol, bucket_id, positions, pnl_pips, tp_pips, next_hedge_info, ai_notes)
 
         # Initialize bucket_closed to False
         bucket_closed = False
@@ -932,6 +887,17 @@ class TradingEngine:
 
         # If bucket not closed, check for zone recovery (only log if executed)
         if not bucket_closed:
+            # [PHASE 2] THE STABILIZER: Check for Hedging Trigger
+            # If Drawdown > 1.5 * ATR, trigger hedge immediately
+            stabilizer_triggered = self.position_manager.check_stabilizer_trigger(bucket_id, market_data)
+            
+            if stabilizer_triggered:
+                logger.warning(f"[STABILIZER] Emergency Hedge Triggered for {bucket_id}")
+                # Force Zone Recovery to execute a hedge
+                # We do this by passing a flag or just letting the risk manager handle it
+                # For now, we rely on the standard zone recovery logic but with heightened awareness
+                # In future, we can call a specific self.risk_manager.execute_stabilizer_hedge()
+            
             logger.info(f"[ZONE_CHECK] Bucket {bucket_id} not closed, checking zone recovery")
             
             # Convert Position objects to dictionaries for zone recovery
@@ -1004,13 +970,12 @@ class TradingEngine:
         }
         logger.info("Session statistics reset")
 
-    async def run_trading_cycle(self, council, strategist, shield, ppo_guardian,
+    async def run_trading_cycle(self, strategist, shield, ppo_guardian,
                                nexus=None, oracle=None) -> None:
         """
         Run a complete trading cycle.
 
         Args:
-            council: Council instance
             strategist: Strategist instance
             shield: IronShield instance
             ppo_guardian: PPO Guardian instance
@@ -1021,8 +986,10 @@ class TradingEngine:
 
         try:
             # Get market data
+            # print(f">>> [DEBUG] Fetching tick for {symbol}...", flush=True)
             tick = self.market_data.get_tick_data(symbol)
             if not tick:
+                print(f">>> [DEBUG] No tick data for {symbol} (Check MT5 Connection/Market Watch)", flush=True)
                 return
 
             # Record market data to database
@@ -1035,22 +1002,33 @@ class TradingEngine:
                 # [UI FEEDBACK] Log pause reason only when it changes to avoid spam
                 if reason != self.last_pause_reason:
                     logger.info(f"[PAUSED] TRADING PAUSED: {reason}")
+                    print(f">>> [PAUSED] {reason}", flush=True)
                     self.last_pause_reason = reason
                 return
             
             # [UI FEEDBACK] Log resumption if we were previously paused
             if self.last_pause_reason is not None:
                 logger.info(f"[RESUMED] TRADING RESUMED: Market conditions normalized.")
+                print(f">>> [RESUMED] Market conditions normalized.", flush=True)
                 self.last_pause_reason = None
 
             # Get account info
             account_info = self.broker.get_account_info()
             if not account_info:
+                print(">>> [WARN] Could not fetch account info", flush=True)
                 return
 
             # Process management for existing positions
-            if await self._process_existing_positions(symbol, tick, shield, ppo_guardian, nexus):
-                return  # Skip new entries if positions were managed
+            # Check for positions first to determine mode (Management vs Hunting)
+            positions = self.broker.get_positions(symbol=symbol)
+            
+            if positions:
+                # MANAGEMENT MODE
+                await self._process_existing_positions(symbol, tick, shield, ppo_guardian, nexus)
+                return # STRICTLY RETURN - No new entries while positions exist
+
+            # HUNTING MODE
+            # Proceed to AI analysis for new entries
 
             # --- LAYER 4: ORACLE ENGINE ---
             oracle_prediction = "NEUTRAL"
@@ -1058,35 +1036,94 @@ class TradingEngine:
             history = self.market_data.candles.get_history(symbol) # Get history once
             
             if oracle:
-                # Get last 60 candles close prices
+                # Get last 60 candles
                 if len(history) >= 60:
-                    closes = [c['close'] for c in history[-60:]]
-                    oracle_prediction, oracle_confidence = oracle.predict(closes)
+                    # Pass full candle objects, Oracle handles extraction
+                    oracle_prediction, oracle_confidence = oracle.predict(history[-60:])
                     if oracle_confidence > 0.6:
                         logger.info(f"[ORACLE] Prediction: {oracle_prediction} ({oracle_confidence:.2f})")
 
-            # --- LAYER 6: THE CHAMELEON (Regime Detection) ---
-            # Detect Market Regime (Ranging, Trending, Volatile)
-            market_regime = council.sentinel.detect_regime(history)
-            logger.info(f"[CHAMELEON] Market Regime: {market_regime.name}")
-
-            # Generate trade signal
-            market_data_dict = {
-                'history': history,
-                'nexus_candles': self.market_data.candles.get_nexus_candles(symbol),
-                'full_candles': self.market_data.candles.get_full_candles(symbol),
-                'account_info': account_info,
-                'macro_slope': 0.0,  # Would be calculated
-                'sentiment_score': 0.0,  # Would be calculated
-                'oracle_prediction': oracle_prediction,
-                'oracle_confidence': oracle_confidence,
-                'market_regime': market_regime # Pass to signal generator if needed
+            # --- HIERARCHICAL AI DECISION LOGIC (v5.0) ---
+            # 1. Supervisor: Detect Regime
+            # Prepare data for Supervisor
+            atr_value, trend_strength = self._calculate_indicators(symbol)
+            rsi_value = self.market_data.calculate_rsi(symbol)
+            macro_context = self.market_data.get_macro_context()
+            
+            supervisor_data = {
+                'atr': atr_value,
+                'trend_strength': trend_strength,
+                'volatility_ratio': self.market_data.get_volatility_ratio(),
+                'macro_context': macro_context
             }
-
-            signal = self.generate_trade_signal(symbol, council, market_data_dict)
+            
+            regime = self.supervisor.detect_regime(supervisor_data)
+            logger.info(f"[SUPERVISOR] Market Regime: {regime.name}")
+            
+            # 2. Supervisor: Select Worker
+            worker_name = self.supervisor.get_active_worker(regime)
+            
+            # 3. Worker: Generate Signal
+            # Prepare context for worker
+            market_context = {
+                'symbol': symbol,
+                'current_price': tick['bid'],
+                'tick': tick,
+                'history': history,
+                'macro_context': self.market_data.get_macro_context(),
+                'rsi': rsi_value,
+                'trend_strength': trend_strength,
+                'atr': atr_value
+            }
+            
+            action, confidence, reason = "HOLD", 0.0, "No Worker"
+            
+            if worker_name == "RANGE_WORKER":
+                action, confidence, reason = self.range_worker.get_signal(market_context)
+            elif worker_name == "TREND_WORKER":
+                action, confidence, reason = self.trend_worker.get_signal(market_context)
+            else:
+                # Fallback for CHAOS or DEFENSIVE regimes
+                # Use RangeWorker but with higher confidence threshold implicitly handled by logic
+                # Or just default to RangeWorker as it's safer
+                action, confidence, reason = self.range_worker.get_signal(market_context)
+                reason = f"[DEFENSIVE] {reason}"
+                
+            # Create Signal Object
+            signal = None
+            if action != "HOLD" and confidence > 0.5:
+                signal = TradeSignal(
+                    action=TradeAction.BUY if action == "BUY" else TradeAction.SELL,
+                    symbol=symbol,
+                    confidence=confidence,
+                    reason=f"[{worker_name}] {reason}",
+                    metadata={
+                        'regime': regime.name,
+                        'worker': worker_name,
+                        'macro_data': self.market_data.get_macro_context(),
+                        'oracle_prediction': oracle_prediction, # Keep Oracle for penalties
+                        'nexus_signal_confidence': confidence # Map for compatibility
+                    },
+                    timestamp=time.time()
+                )
+            
+            # Use market_regime variable for compatibility with downstream logic
+            market_regime = regime
             if not signal:
+                # [UI FEEDBACK] Log "Thinking" status periodically to reassure user
+                if self.decision_tracker:
+                    # Fix: Provide default confidence for HOLD decisions
+                    should_log, _ = self.decision_tracker.should_log_decision(
+                        symbol, {'action': 'HOLD', 'confidence': 0.0, 'reasoning': reason}
+                    )
+                    if should_log:
+                        # Use print to ensure visibility in console
+                        print(f"[AI THINKING] Regime: {regime.name} | Worker: {worker_name} | Action: HOLD | Reason: {reason}", flush=True)
                 return
             
+            # [DEBUG] Force print signal for debugging
+            print(f"[DEBUG] Signal Generated: {signal.action.value} | Conf: {signal.confidence:.2f} | Reason: {signal.reason}", flush=True)
+
             # --- CHAMELEON FILTER (SOFT PENALTY) ---
             # Instead of blocking, reduce lot size for Counter-Trend trades
             regime_penalty = 1.0
@@ -1161,6 +1198,7 @@ class TradingEngine:
                 logger.info(f"[CHAMELEON] Volatility Detected! Reducing lot size to {lot_size:.2f}")
 
             if lot_size <= 0:
+                print(f">>> [DEBUG] Lot Size Rejected: {lot_reason}", flush=True)
                 logger.info(f"[POSITION] SIZING REJECTED: {lot_reason}")
                 return
 
@@ -1179,8 +1217,13 @@ class TradingEngine:
                 logger.info(f"[POSITION] SIZE CALCULATED: {lot_size} lots | Reason: {lot_reason}")
 
             # Final validation (is_recovery_trade=False for normal entries)
+            # [OPTIMIZATION] For Continuous Scalping, we relax the cooldown check if the signal is strong
+            # But we must respect the global cooldown to prevent API bans
             can_enter, entry_reason = self.validate_trade_entry(signal, lot_size, account_info, tick, is_recovery_trade=False)
             if not can_enter:
+                # [DEBUG] Print rejection reason to console
+                print(f">>> [DEBUG] Entry Blocked: {entry_reason}", flush=True)
+
                 # Handle Cooldown Logs specifically (Throttled)
                 if "cooldown" in entry_reason.lower():
                     current_time = time.time()
@@ -1242,12 +1285,14 @@ class TradingEngine:
 
             # Generate Clean Entry Summary
             summary = (
-                f"\n📋 ================= ENTRY SUMMARY ================= 📋\n"
-                f"🚀 Initial Trade: {signal.action.value} {lot_size} lots @ {entry_price:.5f}\n"
-                f"🎯 Target:        Dynamic (Bucket Logic)\n"
-                f"📍 Virtual TP:    {virtual_tp_price:.5f} (+{tp_pips:.1f} pips)\n"
+                f"\n================= ENTRY SUMMARY =================\n"
+                f"Initial Trade: {signal.action.value} {lot_size} lots @ {entry_price:.5f}\n"
+                f"Target:        Dynamic (Bucket Logic)\n"
+                f"Virtual TP:    {virtual_tp_price:.5f} (+{tp_pips:.1f} pips)\n"
                 f"----------------------------------------------------\n"
-                f"🧠 AI Analysis:   {signal.reason}\n"
+                f"Strategy:      {signal.metadata.get('worker', 'Unknown')}\n"
+                f"Regime:        {signal.metadata.get('regime', 'Unknown')}\n"
+                f"AI Analysis:   {signal.reason}\n"
                 f"===================================================="
             )
             
@@ -1258,6 +1303,8 @@ class TradingEngine:
                 f"Target:        Dynamic (Bucket Logic)\n"
                 f"Virtual TP:    {virtual_tp_price:.5f} (+{tp_pips:.1f} pips)\n"
                 f"----------------------------------------------------\n"
+                f"Strategy:      {signal.metadata.get('worker', 'Unknown')}\n"
+                f"Regime:        {signal.metadata.get('regime', 'Unknown')}\n"
                 f"AI Analysis:   {signal.reason}\n"
                 f"===================================================="
             )
@@ -1279,6 +1326,9 @@ class TradingEngine:
                 logger.error(f"[TRADE] EXECUTION FAILED for {signal.symbol}")
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f"Error in trading cycle: {e}", flush=True)
             logger.error(f"Error in trading cycle: {e}")
 
     async def _record_market_data(self, symbol: str, tick: Dict) -> None:
@@ -1394,6 +1444,14 @@ class TradingEngine:
             if bucket_pnl < 0 and len(symbol_positions) < self.risk_manager.config.max_hedges:
                 last_pos = symbol_positions[-1]
                 
+                # [PHASE 2] Check Stabilizer Trigger (Drawdown based)
+                stabilizer_triggered = False
+                if len(symbol_positions) == 1:
+                    bucket_id = self.position_manager.find_bucket_by_tickets([p.ticket for p in symbol_positions])
+                    if bucket_id:
+                        stabilizer_data = {'atr': current_atr}
+                        stabilizer_triggered = self.position_manager.check_stabilizer_trigger(bucket_id, stabilizer_data)
+
                 # Ask Iron Shield: "Should we hedge now?"
                 should_hedge, req_dist = shield.calculate_dynamic_hedge_trigger(
                     entry_price=last_pos.price_open,
@@ -1404,7 +1462,7 @@ class TradingEngine:
                     hedge_count=len(symbol_positions) - 1
                 )
                 
-                if should_hedge:
+                if should_hedge or stabilizer_triggered:
                     # Calculate Intelligent Lot Size using correct pip_value
                     recovery_dist_pips = (current_atr / props['point_size']) # Convert price delta to points
                     
@@ -1421,9 +1479,27 @@ class TradingEngine:
                     # Execute Hedge
                     hedge_type = "SELL" if last_pos.type == 0 else "BUY"
                     
+                    # [CRITICAL] MARGIN CHECK BEFORE HEDGING
+                    if hasattr(self.broker, 'check_margin'):
+                        if not self.broker.check_margin(symbol, hedge_lot, hedge_type):
+                            # Calculate max possible volume
+                            max_vol = self.broker.get_max_volume(symbol, hedge_type)
+                            max_vol = self.broker.normalize_lot_size(symbol, max_vol)
+                            
+                            if max_vol < 0.01:
+                                logger.critical(f"[MARGIN CALL] Cannot place hedge! Required: {hedge_lot}, Max Possible: {max_vol}. ABORTING HEDGE.")
+                                print(f">>> [CRITICAL] MARGIN CALL! Cannot place hedge. Account is over-leveraged.", flush=True)
+                                return False # Cannot hedge, let it ride (or close?)
+                            else:
+                                logger.warning(f"[MARGIN WARNING] Capping hedge size from {hedge_lot} to {max_vol} due to margin constraints.")
+                                hedge_lot = max_vol
+                                ai_reason += " [MARGIN CAPPED]"
+
                     # Construct AI Reason for User
                     ai_reason = "Standard Volatility Defense"
-                    if hedge_type == "BUY":
+                    if stabilizer_triggered:
+                        ai_reason = "STABILIZER PROTOCOL: Drawdown > 1.5x ATR. Emergency Hedge."
+                    elif hedge_type == "BUY":
                         if current_rsi > 75: ai_reason = f"Extreme Bullish Momentum (RSI {current_rsi:.1f}). Max Aggression (1.25x) to counter Sell loss."
                         elif current_rsi > 60: ai_reason = f"Strong Bullish Trend (RSI {current_rsi:.1f}). Increased Aggression (1.15x)."
                         else: ai_reason = f"Normal Market (RSI {current_rsi:.1f}). Standard Overpower (1.05x)."
@@ -1433,11 +1509,19 @@ class TradingEngine:
                         else: ai_reason = f"Normal Market (RSI {current_rsi:.1f}). Standard Overpower (1.05x)."
 
                     # Use UI Logger for visible terminal output
-                    ui_logger.info(f"\n=== HEDGE {len(symbol_positions)} EXECUTED ===")
-                    ui_logger.info(f"Hedge {len(symbol_positions)}:       {hedge_lot:.2f} lots @ {tick['bid'] if hedge_type == 'SELL' else tick['ask']:.5f}")
-                    ui_logger.info(f"AI Reason:     {ai_reason}")
-                    ui_logger.info(f"Context:       ATR={current_atr:.4f} | Dist={recovery_dist_pips:.1f} pips")
-                    ui_logger.info(f"==================================")
+                    # [USER REQUEST] Standardized Hedge Log
+                    TradingLogger.log_initial_trade(f"{symbol}_HEDGE_{len(symbol_positions)}", {
+                        'action': hedge_type,
+                        'symbol': symbol,
+                        'lots': hedge_lot,
+                        'entry_price': tick['bid'] if hedge_type == "SELL" else tick['ask'],
+                        'tp_price': 0.0, # Dynamic
+                        'tp_atr': 0.0,
+                        'tp_pips': 0.0,
+                        'hedges': [], # No nested hedges
+                        'atr_pips': current_atr * 10000, # Approx
+                        'reasoning': f"[HEDGE {len(symbol_positions)}] {ai_reason}"
+                    })
                     
                     # Execute directly via broker to bypass standard entry checks
                     self.broker.execute_order(

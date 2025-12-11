@@ -14,11 +14,69 @@ Version: 1.0.0
 
 import time
 import logging
+from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass
 from threading import Lock
+import MetaTrader5 as mt5
 
 logger = logging.getLogger("MarketDataManager")
+
+
+class CorrelationMonitor:
+    """
+    Phase 1 Upgrade: Monitors correlated assets (USDJPY, US500) 
+    to provide macro context to the AI.
+    """
+    def __init__(self, usd_symbol="USDJPY", risk_symbol="US500"):
+        self.usd_symbol = usd_symbol
+        self.risk_symbol = risk_symbol
+        self.initialized = False
+        self._initialize_symbols()
+
+    def _initialize_symbols(self):
+        """Ensure correlation symbols are available in MT5."""
+        for sym in [self.usd_symbol, self.risk_symbol]:
+            if not mt5.symbol_select(sym, True):
+                logger.warning(f"[WARN] Could not select correlation symbol: {sym}. Macro vision will be limited.")
+            else:
+                logger.info(f"[MACRO] Macro Eye active: Watching {sym}")
+        self.initialized = True
+
+    def get_macro_state(self) -> List[float]:
+        """
+        Returns a vector representing the macro environment.
+        [USD_Velocity, Risk_Velocity]
+        Velocity > 0 means Bullish, < 0 means Bearish.
+        """
+        if not self.initialized:
+            return [0.0, 0.0]
+
+        data = {}
+        for sym in [self.usd_symbol, self.risk_symbol]:
+            # Get last 2 ticks to calculate immediate velocity
+            try:
+                ticks = mt5.copy_ticks_from(sym, datetime.now(), 10, mt5.COPY_TICKS_ALL)
+                if ticks is None or len(ticks) < 2:
+                    data[sym] = 0.0
+                    continue
+                
+                # Calculate simple velocity (Price Change)
+                # Normalized by price to get percentage
+                current = ticks[-1][1] # bid
+                prev = ticks[0][1]
+                if prev == 0:
+                    data[sym] = 0.0
+                else:
+                    velocity = ((current - prev) / prev) * 10000 # Scaled up for AI
+                    data[sym] = velocity
+            except Exception as e:
+                logger.debug(f"Failed to fetch macro data for {sym}: {e}")
+                data[sym] = 0.0
+
+        # Return [USD_Strength, Risk_Sentiment]
+        # Note: If USDJPY rises, Dollar is Strong.
+        return [data.get(self.usd_symbol, 0.0), data.get(self.risk_symbol, 0.0)]
 
 
 @dataclass
@@ -208,7 +266,7 @@ class MarketDataManager:
     Coordinates between different data sources and provides unified access.
     """
 
-    def __init__(self, broker_adapter, timeframe: str = "M1"):
+    def __init__(self, broker_adapter, timeframe: str = "M1", config: Dict = None):
         self.broker = broker_adapter
         self.candles = CandleManager(broker_adapter, timeframe)
         self.market_state = MarketStateManager()
@@ -216,6 +274,24 @@ class MarketDataManager:
         # HFT: Order Book Imbalance Cache
         self.last_obi = 0.0
         self.last_obi_time = 0.0
+
+        # [PHASE 1] Initialize Correlation Monitor
+        self.macro_eye = None
+        if config and config.get('trading', {}).get('correlations', {}).get('enable_correlation', False):
+            corr_config = config['trading']['correlations']
+            self.macro_eye = CorrelationMonitor(
+                usd_symbol=corr_config.get('usd_proxy', 'USDJPY'),
+                risk_symbol=corr_config.get('risk_proxy', 'US500')
+            )
+
+    def get_macro_context(self) -> List[float]:
+        """
+        Get current macro environment state.
+        Returns: [USD_Velocity, Risk_Velocity]
+        """
+        if self.macro_eye:
+            return self.macro_eye.get_macro_state()
+        return [0.0, 0.0]
 
     def get_order_book_imbalance(self, symbol: str) -> float:
         """
