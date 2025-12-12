@@ -1,0 +1,178 @@
+digraph AETHER_Architecture {
+    rankdir=TB;
+    node [shape=box, style=filled, fillcolor=white, fontname="Arial"];
+    compound=true;
+    splines=ortho;
+
+    // Global Styles
+    graph [fontname="Arial", fontsize=16, label="AETHER Trading System Architecture", labelloc=t];
+    edge [color="#666666"];
+
+    // Root Level
+    subgraph cluster_root {
+        label="Root";
+        style=filled;
+        color="#f0f0f0";
+        
+        run_bot [label="run_bot.py", shape=ellipse, fillcolor="#e0e0e0"];
+        setup [label="setup.py"];
+    }
+
+    // Source Code
+    subgraph cluster_src {
+        label="src";
+        style=filled;
+        color="#e8f5e9";
+        
+        main_bot [label="main_bot.py\n(Entry Point)", fillcolor="#a5d6a7", penwidth=2];
+        market_data [label="market_data.py\n(MarketDataManager)"];
+        position_manager [label="position_manager.py\n(PositionManager)"];
+        risk_manager [label="risk_manager.py\n(RiskManager)"];
+        trading_engine [label="trading_engine.py\n(TradingEngine)"];
+        config_validator [label="config_validator.py\n(ConfigValidator)"];
+        deployment_config [label="deployment_config.py\n(Config)"];
+        exceptions [label="exceptions.py"];
+        constants [label="constants.py\n(Global Constants)", fillcolor="#fff9c4"];
+        
+        // AI (New Intelligence)
+        subgraph cluster_ai_new {
+            label="ai";
+            style=filled;
+            color="#fff8e1";
+            
+            hedge_intelligence [label="hedge_intelligence.py\n(HedgeIntelligence)"];
+        }
+
+        // AI Core (Legacy & Core)
+        subgraph cluster_ai {
+            label="ai_core";
+            style=filled;
+            color="#fff3e0";
+            
+            nexus_brain [label="nexus_brain.py\n(NexusBrain)"];
+            nexus_brain_ab [label="nexus_brain_ab.py\n(NexusBrainAB)\n[Incomplete]"];
+            nexus_transformer [label="nexus_transformer.py\n(TimeSeriesTransformer)"];
+            nexus_trainer [label="nexus_trainer.py\n(NexusTrainer)"];
+            oracle [label="oracle.py\n(Oracle)"];
+            strategist [label="strategist.py\n(Strategist)"];
+            supervisor [label="supervisor.py\n(Supervisor)"];
+            workers [label="workers.py\n(Range/TrendWorker)"];
+            evolution [label="evolution_chamber.py\n(EvolutionChamber)"];
+            global_brain [label="global_brain.py\n(GlobalBrain)"];
+            iron_shield [label="iron_shield.py\n(IronShield)"];
+            ppo_guardian [label="ppo_guardian.py\n(PPOGuardian)"];
+        }
+
+        // Automation
+        subgraph cluster_automation {
+            label="automation";
+            style=filled;
+            color="#e3f2fd";
+            
+            auto_quant [label="auto_quant.py\n(AutoQuant)"];
+            order_execution [label="order_execution.py\n(OrderExecution)"];
+            session_manager [label="session_manager.py\n(SessionManager)"];
+        }
+
+        // Bridge
+        subgraph cluster_bridge {
+            label="bridge";
+            style=filled;
+            color="#f3e5f5";
+            
+            broker_factory [label="broker_factory.py\n(BrokerFactory)"];
+            broker_interface [label="broker_interface.py\n(BrokerAdapter)"];
+            mt5_adapter [label="mt5_adapter.py\n(MT5Adapter)"];
+            ccxt_adapter [label="ccxt_adapter.py\n(CCXTAdapter)"];
+        }
+
+        // Infrastructure
+        subgraph cluster_infra {
+            label="infrastructure";
+            style=filled;
+            color="#fce4ec";
+            
+            database [label="database.py\n(MarketMemory)"];
+            async_database [label="async_database.py\n(AsyncDatabase)"];
+            timescale [label="timescale_adapter.py\n(TimescaleMemory)"];
+            supabase_adapter [label="supabase_adapter.py\n(SupabaseAdapter)"];
+            order_book [label="order_book.py\n(OrderBook)"];
+        }
+
+        // Utils
+        subgraph cluster_utils {
+            label="utils";
+            style=filled;
+            color="#fffde7";
+            
+            news_filter [label="news_filter.py\n(NewsFilter)"];
+            trading_logger [label="trading_logger.py\n(TradingLogger)"];
+        }
+    }
+
+    // Relationships (Edges)
+    
+    // Main Bot Dependencies (The Orchestrator)
+    run_bot -> main_bot;
+    main_bot -> market_data;
+    main_bot -> position_manager;
+    main_bot -> risk_manager;
+    main_bot -> trading_engine;
+    main_bot -> config_validator;
+    main_bot -> session_manager;
+    main_bot -> async_database;
+    main_bot -> news_filter;
+    main_bot -> trading_logger;
+    main_bot -> broker_factory;
+    main_bot -> supabase_adapter;
+    main_bot -> constants;
+    main_bot -> exceptions;
+    
+    // Main Bot -> AI Components
+    main_bot -> nexus_brain;
+    main_bot -> ppo_guardian;
+    main_bot -> iron_shield;
+    main_bot -> strategist;
+    main_bot -> global_brain;
+    main_bot -> oracle;
+
+    // Trading Engine Dependencies
+    trading_engine -> order_execution;
+    trading_engine -> risk_manager;
+    trading_engine -> supervisor;
+    trading_engine -> hedge_intelligence;
+    trading_engine -> global_brain;
+    trading_engine -> constants;
+    
+    // AI Core Dependencies
+    nexus_brain -> nexus_transformer;
+    nexus_brain -> constants;
+    nexus_brain_ab -> nexus_brain;
+    nexus_brain_ab -> deployment_config [style=dotted];
+    oracle -> nexus_transformer;
+    nexus_trainer -> nexus_transformer;
+    nexus_trainer -> database;
+    supervisor -> workers;
+    
+    // Automation Dependencies
+    auto_quant -> nexus_trainer;
+    auto_quant -> evolution;
+    session_manager -> mt5_adapter [style=dashed];
+
+    // Bridge Dependencies
+    broker_factory -> mt5_adapter;
+    broker_factory -> ccxt_adapter;
+    mt5_adapter -> broker_interface [arrowhead=empty, style=dashed]; // Implementation
+    ccxt_adapter -> broker_interface [arrowhead=empty, style=dashed]; // Implementation
+
+    // Infrastructure Dependencies
+    database -> timescale;
+    market_data -> order_book;
+    market_data -> database;
+    market_data -> supabase_adapter;
+
+    // Cross-module
+    risk_manager -> position_manager;
+    global_brain -> market_data;
+    config_validator -> constants;
+}

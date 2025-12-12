@@ -38,10 +38,32 @@ class HedgeIntelligence:
         if volatility_ratio > self.CHAOS_THRESHOLD:
             return HedgeDecision(False, f"CHAOS_LOCK (Vol {volatility_ratio:.1f}x)")
 
-        # 2. REGIME FILTER
+        # 2. MOMENTUM EXHAUSTION (RSI + Bollinger Bands)
+        # Only enforce strict exhaustion checks if volatility is elevated.
+        # In calm markets, standard grid logic is fine.
+        rsi = market_data.get('rsi', 50)
+        close_price = market_data.get('close', 0.0)
+        bb_upper = market_data.get('bb_upper', 0.0)
+        bb_lower = market_data.get('bb_lower', 0.0)
+        
+        if volatility_ratio > 1.5:
+            if position_type == 'buy':
+                # We are Long, need to Buy more.
+                # Wait if RSI is not oversold AND Price is above Lower Band
+                # This prevents "catching a falling knife"
+                if rsi > 35 and (bb_lower > 0 and close_price > bb_lower):
+                     return HedgeDecision(False, f"WAIT_FOR_EXHAUSTION (Vol {volatility_ratio:.1f}x, RSI {rsi:.1f})")
+            
+            elif position_type == 'sell':
+                # We are Short, need to Sell more.
+                # Wait if RSI is not overbought AND Price is below Upper Band
+                # This prevents selling into a rocket
+                if rsi < 65 and (bb_upper > 0 and close_price < bb_upper):
+                    return HedgeDecision(False, f"WAIT_FOR_EXHAUSTION (Vol {volatility_ratio:.1f}x, RSI {rsi:.1f})")
+
+        # 3. REGIME FILTER (Secondary Check)
         # In a strong trend, don't hedge against it blindly.
         adx = market_data.get('adx', 0)
-        rsi = market_data.get('rsi', 50)
         
         if regime == "TREND":
             if position_type == 'buy' and rsi > 40 and adx > self.STRONG_TREND_ADX:

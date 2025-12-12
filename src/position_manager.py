@@ -277,7 +277,7 @@ class PositionManager:
         # Calculate Drawdown
         drawdown = self.calculate_bucket_drawdown(bucket_id, market_data)
         
-        # Calculate Threshold (1.5 * ATR in USD)
+        # Calculate Threshold (4.0 * ATR in USD) - [TUNED FOR GOLD]
         atr_value = market_data.get('atr', 0.0010)
         total_volume = sum(p.volume for p in positions)
         symbol = positions[0].symbol
@@ -288,10 +288,11 @@ class PositionManager:
         # ATR in USD = ATR_Price * Contract_Size * Volume
         atr_usd = atr_value * contract_size * total_volume
         
-        threshold = atr_usd * 1.5
+        # [CRITICAL] Increased from 1.5x to 4.0x to give Gold breathing room
+        threshold = atr_usd * 4.0
         
         if drawdown > threshold:
-            logger.warning(f"[STABILIZER] Triggered! Drawdown ${drawdown:.2f} > Threshold ${threshold:.2f} (1.5x ATR)")
+            logger.warning(f"[STABILIZER] Triggered! Drawdown ${drawdown:.2f} > Threshold ${threshold:.2f} (4.0x ATR)")
             return True
             
         return False
@@ -1138,7 +1139,7 @@ class PositionManager:
                 # Log status if positive but waiting
                 if net_pnl > 0 and not profit_exit:
                     if net_pnl > (effective_target * 0.5):
-                         logger.info(f"[{symbol}] PnL: Net ${net_pnl:.2f} / Target ${effective_target:.2f}{status_msg} (Gross ${gross_pnl:.2f} - Costs ${abs(comm)+abs(swap):.2f})")
+                         logger.info(f"[{first_pos.symbol}] PnL: Net ${net_pnl:.2f} / Target ${effective_target:.2f}{status_msg} (Gross ${gross_pnl:.2f} - Costs ${abs(comm)+abs(swap):.2f})")
                 
                 if profit_exit:
                     if ratchet_exit:
@@ -1243,7 +1244,7 @@ class PositionManager:
             logger.error(f"Error evaluating bucket {bucket_id} exit: {e}")
             return False, 0.0
 
-    async def update_bucket_tp(self, symbol: str, bucket_id: str):
+    async def update_bucket_tp(self, symbol: str, bucket_id: str, current_price: float = None):
         """
         Updates the TP for all positions in a bucket using Dynamic Profit Decay.
         """
@@ -1252,8 +1253,8 @@ class PositionManager:
             return
 
         # Get current market price
-        tick = await self.market.get_tick(symbol)
-        if not tick:
+        if current_price is None:
+            # Fallback if not provided (should not happen with correct calling)
             return
             
         # Calculate the new "Survival" TP
@@ -1585,6 +1586,21 @@ class PositionManager:
     def clear_pending_close(self, symbol: str) -> None:
         """Clear pending close flag for a symbol."""
         self.pending_closes.pop(symbol, None)
+
+    def get_positions_in_bucket(self, bucket_id: str) -> List[Position]:
+        """
+        Get all Position objects belonging to a specific bucket.
+        """
+        with self._lock:
+            if bucket_id not in self.bucket_stats:
+                return []
+            
+            ticket_ids = self.bucket_stats[bucket_id].positions
+            positions = []
+            for ticket in ticket_ids:
+                if ticket in self.active_positions:
+                    positions.append(self.active_positions[ticket])
+            return positions
 
     def add_position_to_bucket(self, bucket_id: str, ticket: int) -> bool:
         """

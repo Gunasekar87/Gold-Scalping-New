@@ -561,3 +561,28 @@ class MarketDataManager:
         except Exception as e:
             logger.error(f"Error calculating RSI for {symbol}: {e}")
             return 50.0
+
+    def calculate_bollinger_bands(self, symbol: str, period: int = 20, std_dev: float = 2.0) -> Dict[str, float]:
+        """
+        Calculate Bollinger Bands (Upper, Middle, Lower).
+        Used for Momentum Exhaustion logic.
+        """
+        try:
+            candles = self.candles.get_history(symbol)
+            if len(candles) < period:
+                return {'upper': 0.0, 'middle': 0.0, 'lower': 0.0}
+
+            closes = [c['close'] for c in candles[-period:]]
+            sma = sum(closes) / period
+            
+            variance = sum([((x - sma) ** 2) for x in closes]) / period
+            std = variance ** 0.5
+            
+            return {
+                'upper': sma + (std * std_dev),
+                'middle': sma,
+                'lower': sma - (std * std_dev)
+            }
+        except Exception as e:
+            logger.error(f"Error calculating Bollinger Bands for {symbol}: {e}")
+            return {'upper': 0.0, 'middle': 0.0, 'lower': 0.0}

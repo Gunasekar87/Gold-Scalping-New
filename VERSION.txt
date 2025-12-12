@@ -1,4 +1,10 @@
-﻿v5.1 (INTELLIGENCE UPGRADE) - 2025-12-11
+﻿v5.1.1 (STABILITY & DOCS) - 2025-12-12
+- [FIX] Runtime: Fixed UnboundLocalError in TradingEngine.
+- [FIX] Runtime: Fixed AttributeError in PositionManager.
+- [NEW] Momentum Exhaustion: Added Bollinger Band + RSI logic for smarter hedging.
+- [DOCS] Architecture: Added comprehensive Graphviz DOT diagram (project_structure_final.dot).
+
+v5.1 (INTELLIGENCE UPGRADE) - 2025-12-11
 - [NEW] Hedge Intelligence (The Oracle): AI module to filter strategic hedges based on Regime/Trend.
 - [NEW] Zero-Latency Closing: Parallel execution for bucket exits (~200ms total latency).
 - [NEW] Smart Grid: Dynamic grid step calculation based on volatility.

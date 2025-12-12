@@ -34,7 +34,7 @@ ai_parameters:
   spread_max_points: 50  # Maximum 5.0 pips spread for entry
   
   # ATR-based dynamic parameter multipliers
-  atr_zone_multiplier: 0.4   # Reduced to 0.4 to keep Hedge 3 closer
+  atr_zone_multiplier: 1.5   # Increased from 0.4 to 1.5 (Wider Grid)
   atr_tp_multiplier: 0.8      # Increased to 0.8 to extend profit targets
   
   # Dynamic exit parameters (as percentage of equity)

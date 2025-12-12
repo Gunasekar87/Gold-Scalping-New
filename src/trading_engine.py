@@ -1449,8 +1449,9 @@ class TradingEngine:
                 
                 # [PHASE 2] Check Stabilizer Trigger (Drawdown based)
                 stabilizer_triggered = False
+                bucket_id = self.position_manager.find_bucket_by_tickets([p.ticket for p in symbol_positions])
+                
                 if len(symbol_positions) == 1:
-                    bucket_id = self.position_manager.find_bucket_by_tickets([p.ticket for p in symbol_positions])
                     if bucket_id:
                         stabilizer_data = {'atr': current_atr}
                         stabilizer_triggered = self.position_manager.check_stabilizer_trigger(bucket_id, stabilizer_data)
@@ -1469,6 +1470,20 @@ class TradingEngine:
                     # [AI INTELLIGENCE] Filter Strategic Hedges (IronShield)
                     # We always allow Stabilizer (Emergency) hedges, but we filter Strategic ones.
                     if should_hedge and not stabilizer_triggered:
+                        # Construct market_data for AI
+                        trend_strength = self.market_data.calculate_trend_strength(symbol)
+                        bb = self.market_data.calculate_bollinger_bands(symbol)
+                        market_data = {
+                            'atr': current_atr,
+                            'rsi': current_rsi,
+                            'trend_strength': trend_strength,
+                            'volatility_ratio': self.market_data.market_state.get_volatility_ratio(),
+                            'close': tick['bid'],
+                            'bb_upper': bb['upper'],
+                            'bb_lower': bb['lower'],
+                            'macro_context': self.market_data.get_macro_context()
+                        }
+
                         # Detect Regime
                         regime_obj = self.supervisor.detect_regime(market_data)
                         
@@ -1509,82 +1524,84 @@ class TradingEngine:
                         rsi=current_rsi     # PASSING AI DATA
                     )
                     
-                    # Execute Hedge
-                    hedge_type = "SELL" if last_pos.type == 0 else "BUY"
-                    
-                    # [CRITICAL] MARGIN CHECK BEFORE HEDGING
-                    if hasattr(self.broker, 'check_margin'):
-                        if not self.broker.check_margin(symbol, hedge_lot, hedge_type):
-                            # Calculate max possible volume
-                            max_vol = self.broker.get_max_volume(symbol, hedge_type)
-                            max_vol = self.broker.normalize_lot_size(symbol, max_vol)
-                            
-                            if max_vol < 0.01:
-                                logger.critical(f"[MARGIN CALL] Cannot place hedge! Required: {hedge_lot}, Max Possible: {max_vol}. ABORTING HEDGE.")
-                                print(f">>> [CRITICAL] MARGIN CALL! Cannot place hedge. Account is over-leveraged.", flush=True)
-                                
-                                # [AI INTELLIGENCE] SHED WEIGHT
-                                # If we can't hedge, we MUST reduce exposure to survive.
-                                shed_candidates = self.hedge_intel.find_shedding_opportunity(symbol_positions)
-                                if shed_candidates:
-                                    logger.warning(f"[SURVIVAL] Shedding 2 trades to free margin...")
-                                    # Close the candidates
-                                    for pos in shed_candidates:
-                                        await self.broker.close_position(pos.ticket)
-                                    return True # We took action (shedding), so we are "done" for this tick
-                                
-                                return False # Cannot hedge, let it ride
-                            else:
-                                logger.warning(f"[MARGIN WARNING] Capping hedge size from {hedge_lot} to {max_vol} due to margin constraints.")
-                                hedge_lot = max_vol
-                                ai_reason += " [MARGIN CAPPED]"
+                        # Execute Hedge
+                        hedge_type = "SELL" if last_pos.type == 0 else "BUY"
+                        
+                        # Initialize ai_reason early to avoid UnboundLocalError
+                        ai_reason = "Standard Volatility Defense"
 
-                    # Construct AI Reason for User
-                    ai_reason = "Standard Volatility Defense"
-                    if stabilizer_triggered:
-                        ai_reason = "STABILIZER PROTOCOL: Drawdown > 1.5x ATR. Emergency Hedge."
-                    elif hedge_type == "BUY":
-                        if current_rsi > 75: ai_reason = f"Extreme Bullish Momentum (RSI {current_rsi:.1f}). Max Aggression (1.25x) to counter Sell loss."
-                        elif current_rsi > 60: ai_reason = f"Strong Bullish Trend (RSI {current_rsi:.1f}). Increased Aggression (1.15x)."
-                        else: ai_reason = f"Normal Market (RSI {current_rsi:.1f}). Standard Overpower (1.05x)."
-                    else: # SELL
-                        if current_rsi < 25: ai_reason = f"Extreme Bearish Momentum (RSI {current_rsi:.1f}). Max Aggression (1.25x) to counter Buy loss."
-                        elif current_rsi < 40: ai_reason = f"Strong Bearish Trend (RSI {current_rsi:.1f}). Increased Aggression (1.15x)."
-                        else: ai_reason = f"Normal Market (RSI {current_rsi:.1f}). Standard Overpower (1.05x)."
+                        # [CRITICAL] MARGIN CHECK BEFORE HEDGING
+                        if hasattr(self.broker, 'check_margin'):
+                            if not self.broker.check_margin(symbol, hedge_lot, hedge_type):
+                                # Calculate max possible volume
+                                max_vol = self.broker.get_max_volume(symbol, hedge_type)
+                                max_vol = self.broker.normalize_lot_size(symbol, max_vol)
+                                
+                                if max_vol < 0.01:
+                                    logger.critical(f"[MARGIN CALL] Cannot place hedge! Required: {hedge_lot}, Max Possible: {max_vol}. ABORTING HEDGE.")
+                                    print(f">>> [CRITICAL] MARGIN CALL! Cannot place hedge. Account is over-leveraged.", flush=True)
+                                    
+                                    # [AI INTELLIGENCE] SHED WEIGHT
+                                    # If we can't hedge, we MUST reduce exposure to survive.
+                                    shed_candidates = self.hedge_intel.find_shedding_opportunity(symbol_positions)
+                                    if shed_candidates:
+                                        logger.warning(f"[SURVIVAL] Shedding 2 trades to free margin...")
+                                        # Close the candidates
+                                        for pos in shed_candidates:
+                                            await self.broker.close_position(pos.ticket)
+                                        return True # We took action (shedding), so we are "done" for this tick
+                                    
+                                    return False # Cannot hedge, let it ride
+                                else:
+                                    logger.warning(f"[MARGIN WARNING] Capping hedge size from {hedge_lot} to {max_vol} due to margin constraints.")
+                                    hedge_lot = max_vol
+                                    ai_reason += " [MARGIN CAPPED]"
 
-                    # Use UI Logger for visible terminal output
-                    # [USER REQUEST] Standardized Hedge Log
-                    TradingLogger.log_initial_trade(f"{symbol}_HEDGE_{len(symbol_positions)}", {
-                        'action': hedge_type,
-                        'symbol': symbol,
-                        'lots': hedge_lot,
-                        'entry_price': tick['bid'] if hedge_type == "SELL" else tick['ask'],
-                        'tp_price': 0.0, # Dynamic
-                        'tp_atr': 0.0,
-                        'tp_pips': 0.0,
-                        'hedges': [], # No nested hedges
-                        'atr_pips': current_atr * 10000, # Approx
-                        'reasoning': f"[HEDGE {len(symbol_positions)}] {ai_reason}"
-                    })
-                    
-                    # Execute directly via broker to bypass standard entry checks
-                    self.broker.execute_order(
-                        action="OPEN",
-                        symbol=symbol,
-                        order_type=hedge_type,
-                        volume=hedge_lot,
-                        price=tick['bid'] if hedge_type == "SELL" else tick['ask'],
-                        sl=0.0, tp=0.0,
-                        comment="Elastic_Hedge"
-                    )
-                    elastic_hedge_triggered = True
-                    
-                    # [AI INTELLIGENCE] Update Bucket TP immediately
-                    # Now that we have a new hedge, the "Survival TP" changes.
-                    # We must update all trades in the bucket to the new target.
-                    if bucket_id:
-                        await self.position_manager.update_bucket_tp(symbol, bucket_id)
-                    return True # Managed
+                        # Construct AI Reason for User
+                        if stabilizer_triggered:
+                            ai_reason = "STABILIZER PROTOCOL: Drawdown > 1.5x ATR. Emergency Hedge."
+                        elif hedge_type == "BUY":
+                            if current_rsi > 75: ai_reason = f"Extreme Bullish Momentum (RSI {current_rsi:.1f}). Max Aggression (1.25x) to counter Sell loss."
+                            elif current_rsi > 60: ai_reason = f"Strong Bullish Trend (RSI {current_rsi:.1f}). Increased Aggression (1.15x)."
+                            else: ai_reason = f"Normal Market (RSI {current_rsi:.1f}). Standard Overpower (1.05x)."
+                        else: # SELL
+                            if current_rsi < 25: ai_reason = f"Extreme Bearish Momentum (RSI {current_rsi:.1f}). Max Aggression (1.25x) to counter Buy loss."
+                            elif current_rsi < 40: ai_reason = f"Strong Bearish Trend (RSI {current_rsi:.1f}). Increased Aggression (1.15x)."
+                            else: ai_reason = f"Normal Market (RSI {current_rsi:.1f}). Standard Overpower (1.05x)."
+
+                        # Use UI Logger for visible terminal output
+                        # [USER REQUEST] Standardized Hedge Log
+                        TradingLogger.log_initial_trade(f"{symbol}_HEDGE_{len(symbol_positions)}", {
+                            'action': hedge_type,
+                            'symbol': symbol,
+                            'lots': hedge_lot,
+                            'entry_price': tick['bid'] if hedge_type == "SELL" else tick['ask'],
+                            'tp_price': 0.0, # Dynamic
+                            'tp_atr': 0.0,
+                            'tp_pips': 0.0,
+                            'hedges': [], # No nested hedges
+                            'atr_pips': current_atr * 10000, # Approx
+                            'reasoning': f"[HEDGE {len(symbol_positions)}] {ai_reason}"
+                        })
+                        
+                        # Execute directly via broker to bypass standard entry checks
+                        self.broker.execute_order(
+                            action="OPEN",
+                            symbol=symbol,
+                            order_type=hedge_type,
+                            volume=hedge_lot,
+                            price=tick['bid'] if hedge_type == "SELL" else tick['ask'],
+                            sl=0.0, tp=0.0,
+                            comment="Elastic_Hedge"
+                        )
+                        elastic_hedge_triggered = True
+                        
+                        # [AI INTELLIGENCE] Update Bucket TP immediately
+                        # Now that we have a new hedge, the "Survival TP" changes.
+                        # We must update all trades in the bucket to the new target.
+                        if bucket_id:
+                            await self.position_manager.update_bucket_tp(symbol, bucket_id, tick['bid'])
+                        return True # Managed
 
             # If Elastic Defense didn't trigger a hedge, we still check for EXITS (TP/SL)
             # But we should probably prevent Zone Recovery from adding a hedge if Elastic Defense said "Wait".
