@@ -3,28 +3,29 @@
     "XAUUSD_0": {
       "bucket_id": "XAUUSD_0",
       "positions": [],
-      "net_profit": -67.56,
-      "open_time": 1765558009.4539745,
-      "last_update": 1765771549.219365,
+      "net_profit": 410.04,
+      "open_time": 1765776552.637225,
+      "last_update": 1765776552.637225,
       "closed": true,
-      "state": "bucket_active",
-      "mode": "bucket",
-      "last_state_check": 1765558009.4539745,
-      "exit_reason": ""
+      "state": "pending_close",
+      "mode": "single",
+      "last_state_check": 1765776552.639204,
+      "exit_reason": "PROFIT"
     },
     "XAUUSD_1": {
       "bucket_id": "XAUUSD_1",
       "positions": [
-        214536530,
-        214536547
+        214551661,
+        214553314,
+        214557182
       ],
-      "net_profit": -0.92,
-      "open_time": 1765772638.450284,
-      "last_update": 1765772640.7962883,
+      "net_profit": -183.57999999999998,
+      "open_time": 1765778089.7144983,
+      "last_update": 1765778822.7966838,
       "closed": false,
       "state": "bucket_active",
       "mode": "bucket",
-      "last_state_check": 1765772638.450284,
+      "last_state_check": 1765778089.7144983,
       "exit_reason": ""
     }
   },
@@ -291,42 +292,12 @@
         "zone_width_pips": "54.86"
       }
     },
-    "214536530": {
-      "symbol": "XAUUSD",
-      "type": "SELL",
-      "entry_price": 4329.52,
-      "entry_tp_pips": 28.264285714284856,
-      "entry_sl_pips": 0.0,
-      "entry_atr": 0.9421428571428285,
-      "obs": [
-        0.0,
-        0.9421428571428285,
-        0.0,
-        0.7
-      ],
-      "action": [
-        1.0,
-        0.8
-      ],
-      "open_time": 1765772638.0319848,
-      "hedge_plan": {
-        "hedge1_trigger_price": 4329.755535714286,
-        "hedge2_trigger_price": 4329.52,
-        "hedge3_trigger_price": 4329.826196428572,
-        "hedge4_trigger_price": 4329.52,
-        "hedge1_lots": 0.06,
-        "hedge2_lots": 0.18,
-        "hedge3_lots": 0.54,
-        "hedge4_lots": 1.63,
-        "zone_width_pips": "23.55"
-      }
-    },
-    "214536547": {
+    "214557182": {
       "symbol": "XAUUSD",
       "type": "BUY",
-      "entry_price": 4330.01,
+      "entry_price": 4340.57,
       "obs": [
-        46.00000000000364,
+        154.99999999992724,
         0.001,
         0.0,
         0.0
@@ -335,8 +306,8 @@
         1.0,
         0.8
       ],
-      "open_time": 1765772640.7943013
+      "open_time": 1765778822.7828012
     }
   },
-  "timestamp": 1765772640.7962883
+  "timestamp": 1765778822.7966838
 }

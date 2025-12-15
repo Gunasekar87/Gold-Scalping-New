@@ -316,11 +316,14 @@ class PositionManager:
             # Check Duration (Stuck Trade?)
             duration_mins = (time.time() - stats.open_time) / 60
             if duration_mins < 15:
+                # logger.debug(f"[MUSCLE] Bucket {bucket_id} too young: {duration_mins:.1f}m < 15m")
                 return False # Not stuck yet
                 
             # Check if we already tried recovery recently (cooldown)
             # [FIX] Use specific recovery timestamp, not generic update time
-            if time.time() - getattr(stats, 'last_recovery_time', 0.0) < 300: # 5 mins cooldown
+            time_since_recovery = time.time() - getattr(stats, 'last_recovery_time', 0.0)
+            if time_since_recovery < 300: # 5 mins cooldown
+                logger.info(f"[MUSCLE] Cooldown active for {bucket_id}: {time_since_recovery:.0f}s < 300s")
                 return False
 
             positions = [self.active_positions[t] for t in stats.positions if t in self.active_positions]
@@ -331,6 +334,7 @@ class PositionManager:
             net_pnl = sum(p.profit for p in positions) + sum(p.swap for p in positions) + sum(p.commission for p in positions)
             
             if net_pnl >= 0:
+                # logger.debug(f"[MUSCLE] Bucket {bucket_id} is in profit (${net_pnl:.2f}). No recovery needed.")
                 return False # Not in loss
                 
             deficit = abs(net_pnl)
@@ -411,7 +415,8 @@ class PositionManager:
         Returns:
             PositionState enum value
         """
-        bucket_id = f"{position.symbol}_{position.type}"
+        # [FIX] Unified Bucket ID: One bucket per symbol (Buys + Sells combined)
+        bucket_id = position.symbol
         stats = self.bucket_stats.get(bucket_id)
         
         if not stats:
@@ -479,7 +484,8 @@ class PositionManager:
         Returns:
             bool: True if transition successful, False otherwise
         """
-        bucket_id = f"{symbol}_{position_type}"
+        # [FIX] Unified Bucket ID: One bucket per symbol
+        bucket_id = symbol
         
         with self._state_transition_lock:
             stats = self.bucket_stats.get(bucket_id)
@@ -677,7 +683,8 @@ class PositionManager:
                         entry_atr = metadata.get('entry_atr', 0.0)
                     
                     # Determine position state - check if it's in a bucket
-                    bucket_id = f"{symbol}_{p_type}"
+                    # [FIX] Unified Bucket ID: One bucket per symbol
+                    bucket_id = symbol
                     if bucket_id in self.bucket_stats and not self.bucket_stats[bucket_id].closed:
                         # Part of existing bucket
                         pos_state = self.bucket_stats[bucket_id].state
@@ -807,7 +814,8 @@ class PositionManager:
         if not positions:
             return ""
 
-        bucket_id = f"{positions[0].symbol}_{positions[0].type}"  # Use symbol_type for consistency
+        # [FIX] Unified Bucket ID: One bucket per symbol
+        bucket_id = positions[0].symbol
 
         with self._lock:
             # Determine initial state and mode based on position count
@@ -1400,13 +1408,22 @@ class PositionManager:
                 
                 # [CRITICAL VALIDATION] Check if TP is valid for this specific trade direction
                 is_valid_tp = False
+                
+                # Ensure we have valid price data
+                if current_price is None or current_price <= 0:
+                    continue
+                    
                 if pos.type == 0: # BUY
                     # TP must be > Current Bid + StopLevel
-                    if new_tp > (current_price + stop_level_dist):
+                    # Use a slightly larger buffer (2x StopLevel) to be safe against spread fluctuations
+                    min_allowed_tp = current_price + max(stop_level_dist, 0.01)
+                    if new_tp > min_allowed_tp:
                         is_valid_tp = True
                 else: # SELL
                     # TP must be < Current Ask - StopLevel
-                    if new_tp < (current_ask - stop_level_dist):
+                    # Use a slightly larger buffer
+                    max_allowed_tp = current_ask - max(stop_level_dist, 0.01)
+                    if new_tp < max_allowed_tp:
                         is_valid_tp = True
                 
                 # If invalid (e.g. hedging leg that is losing), set TP to 0.0 (Virtual Exit only)
