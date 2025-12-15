@@ -77,6 +77,8 @@ class Position:
     sl: float
     tp: float
     time: float
+    swap: float = 0.0  # [FIX] Added swap field
+    commission: float = 0.0  # [FIX] Added commission field
     magic: int = 0  # [FIX] Added magic number field
     comment: str = ""
     state: PositionState = PositionState.SINGLE_ACTIVE
@@ -325,7 +327,8 @@ class PositionManager:
                 return False
                 
             # Calculate Net Deficit
-            net_pnl = sum(p.profit for p in positions) + sum(p.swap for p in positions) + sum(p.commission for p in positions)
+            # [FIX] Use getattr for safety against stale objects
+            net_pnl = sum(p.profit for p in positions) + sum(getattr(p, 'swap', 0.0) for p in positions) + sum(getattr(p, 'commission', 0.0) for p in positions)
             
             if net_pnl >= 0:
                 return False # Not in loss
@@ -710,6 +713,8 @@ class PositionManager:
                         sl = pos_data['sl']
                         tp = pos_data['tp']
                         time_val = pos_data['time']
+                        swap = pos_data.get('swap', 0.0)
+                        commission = pos_data.get('commission', 0.0)
                         magic = pos_data.get('magic', 0)
                         comment = pos_data.get('comment', '')
                     else:
@@ -724,6 +729,8 @@ class PositionManager:
                         sl = pos_data.sl
                         tp = pos_data.tp
                         time_val = pos_data.time
+                        swap = getattr(pos_data, 'swap', 0.0)
+                        commission = getattr(pos_data, 'commission', 0.0)
                         magic = getattr(pos_data, 'magic', 0)
                         comment = getattr(pos_data, 'comment', '')
 
@@ -758,6 +765,8 @@ class PositionManager:
                         sl=sl,
                         tp=tp,
                         time=time_val,
+                        swap=swap,
+                        commission=commission,
                         magic=magic,
                         comment=comment,
                         state=pos_state,
@@ -1806,6 +1815,22 @@ class PositionManager:
                         logger.info(f"[CLOSE RETRY] Success: Closed {ticket}")
                     else:
                         logger.error(f"[CLOSE FINAL FAIL] Ticket {ticket}: {result.get('comment')}")
+                        
+                # [LAST RESORT] Individual Close Loop
+                # If batch close failed twice, try one-by-one (slower but safer)
+                if failed_tickets:
+                    logger.warning(f"[CLOSE LAST RESORT] Switching to individual close for {len(failed_tickets)} tickets")
+                    still_failed = []
+                    for ticket in failed_tickets:
+                        if ticket in self.active_positions:
+                            res = await broker.close_position(ticket)
+                            if res:
+                                successful_closes += 1
+                                logger.info(f"[CLOSE INDIVIDUAL] Success: Closed {ticket}")
+                            else:
+                                still_failed.append(ticket)
+                                logger.error(f"[CLOSE DEAD] Failed to close {ticket} individually")
+                    failed_tickets = still_failed
 
         if failed_tickets:
             logger.error(f"[CLOSE FAILURE] Bucket {bucket_id}: {len(failed_tickets)} positions remained open.")

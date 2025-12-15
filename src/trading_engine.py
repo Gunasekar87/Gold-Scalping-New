@@ -29,6 +29,13 @@ from .infrastructure.async_database import (
 )
 from .utils.trading_logger import TradingLogger, DecisionTracker, format_pips
 
+# [AI INTELLIGENCE] New Policy & Governance Modules
+from src.config.settings import FLAGS, POLICY as _PTUNE, RISK as _RLIM
+from src.policy.hedge_policy import HedgePolicy, HedgeConfig
+from src.policy.risk_governor import RiskGovernor, RiskLimits
+from src.utils.telemetry import TelemetryWriter, DecisionRecord
+from src.features.market_features import spread_atr, zscore, simple_breakout_quality, simple_regime_trend
+
 logger = logging.getLogger("TradingEngine")
 # [CRITICAL] Get the specific UI logger that run_bot.py listens to
 ui_logger = logging.getLogger("AETHER_UI")
@@ -98,6 +105,23 @@ class TradingEngine:
         self.range_worker = RangeWorker()
         self.trend_worker = TrendWorker()
         self.hedge_intel = HedgeIntelligence(self.config) # [NEW] Initialize Oracle
+        self.news_filter = NewsFilter() # [AI INTELLIGENCE] Initialize News Filter
+
+        # [AI INTELLIGENCE] Initialize Policy & Governance
+        self._telemetry = TelemetryWriter()
+        self._hedge_policy = HedgePolicy(HedgeConfig(
+            min_confidence=_PTUNE.MIN_CONFIDENCE,
+            max_spread_atr=_PTUNE.MAX_SPREAD_ATR,
+            tp_atr_mult=_PTUNE.TP_ATR_MULT,
+            sl_atr_mult=_PTUNE.SL_ATR_MULT,
+            max_stack=_PTUNE.MAX_HEDGE_STACK,
+        ))
+        self._governor = RiskGovernor(RiskLimits(
+            max_daily_loss_pct=_RLIM.MAX_DAILY_LOSS_PCT,
+            max_total_exposure=_RLIM.MAX_TOTAL_EXPOSURE,
+            max_spread_points=_RLIM.MAX_SPREAD_POINTS,
+            news_lockout=_RLIM.NEWS_LOCKOUT,
+        ))
 
         # Async database components
         self.db_manager = db_manager
@@ -901,6 +925,28 @@ class TradingEngine:
         # Initialize bucket_closed to False
         bucket_closed = False
         
+        # [AI PLAN B] Reversion Escape Check
+        # If Plan B is active (Fakeout Detected) OR Risk Veto is active (Defensive Hold),
+        # we exit as soon as we are profitable (Break-Even + small profit) to reduce risk.
+        if getattr(self, f"_plan_b_active_{symbol}", False) or getattr(self, f"_plan_b_veto_{symbol}", False):
+            # Calculate Net PnL (Profit + Swap + Commission)
+            net_profit = sum(
+                (p.get('profit', 0.0) if isinstance(p, dict) else p.profit) + 
+                (p.get('swap', 0.0) if isinstance(p, dict) else p.swap) + 
+                (p.get('commission', 0.0) if isinstance(p, dict) else p.commission) 
+                for p in positions
+            )
+            
+            # Target: Just enough to cover costs and a tiny profit (e.g. $0.50)
+            # This ensures "Nil Loss" without greed.
+            if net_profit > 0.50: 
+                logger.info(f"🚀 [PLAN B] Reversion Escape Successful! Net Profit: ${net_profit:.2f}. Closing all positions.")
+                bucket_closed = await self.position_manager.close_bucket_positions(self.broker, bucket_id, symbol)
+                if bucket_closed:
+                    setattr(self, f"_plan_b_active_{symbol}", False)
+                    setattr(self, f"_plan_b_veto_{symbol}", False)
+                    return True
+        
         logger.info(f"[TP_CHECK] About to call should_close_bucket for {bucket_id}")
         should_close, confidence = self.position_manager.should_close_bucket(
             bucket_id, ppo_guardian, nexus, market_data
@@ -1290,6 +1336,20 @@ class TradingEngine:
             if not can_enter:
                 # [DEBUG] Print rejection reason to console
                 print(f">>> [DEBUG] Entry Blocked: {entry_reason}", flush=True)
+                
+                # [TELEMETRY] Log blocked entry for analysis
+                if FLAGS.ENABLE_TELEMETRY:
+                    self._telemetry.write(DecisionRecord(
+                        ts=time.time(),
+                        symbol=symbol,
+                        action="entry_blocked",
+                        side="buy" if signal.action == TradeAction.BUY else "sell",
+                        price=tick['ask'] if signal.action == TradeAction.BUY else tick['bid'],
+                        lots=lot_size,
+                        features={"reason": entry_reason, "obi": tick.get('obi', 0.0)},
+                        context={"regime": regime.name, "worker": worker_name},
+                        decision={"blocked": True, "reason": entry_reason}
+                    ))
 
                 # Handle Cooldown Logs specifically (Throttled)
                 if "cooldown" in entry_reason.lower():
@@ -1454,6 +1514,34 @@ class TradingEngine:
                 "point_size": 0.00001,
                 "pip_size": 0.0001
             }
+
+    async def _handle_blocked_hedge_strategy(self, symbol, positions, decision, tick):
+        """
+        [HIGHEST INTELLIGENCE] Plan B:
+        When AI blocks a hedge, we don't just walk away. 
+        We optimize the EXISTING positions to escape the danger zone.
+        """
+        reasons = decision.get("reasons", [])
+        
+        # STRATEGY 1: FAKEOUT DETECTED (Weak Trend)
+        # If the hedge was blocked because the trend is weak (Low Confidence),
+        # it means the AI predicts a Reversion (Bounce).
+        if any("min_conf" in r for r in reasons):
+            # We log this strategic shift.
+            # In a fully automated version, this would send a 'ModifyOrder' to move TP to Break-Even.
+            # For now, we activate "Reversion Escape Mode".
+            if not getattr(self, f"_plan_b_active_{symbol}", False):
+                logger.info(f"🧠 [AI PLAN B] Hedge blocked (Fakeout Detected). "
+                            f"Strategy shifted to 'Mean Reversion Escape' for {symbol}. "
+                            f"Expecting price bounce to exit in profit.")
+                setattr(self, f"_plan_b_active_{symbol}", True)
+
+        # STRATEGY 2: RISK LIMIT REACHED
+        elif any("veto" in r for r in reasons):
+            if not getattr(self, f"_plan_b_veto_{symbol}", False):
+                logger.warning(f"🛡️ [AI PLAN B] Risk Governor active. "
+                               f"Holding {symbol} positions defensively (No new risk added).")
+                setattr(self, f"_plan_b_veto_{symbol}", True)
 
     async def _process_existing_positions(self, symbol: str, tick: Dict, shield, ppo_guardian, nexus, oracle=None) -> bool:
         """
@@ -1661,6 +1749,94 @@ class TradingEngine:
                                     hedge_lot = max_vol
                                     ai_reason += " [MARGIN CAPPED]"
 
+                        # [AI INTELLIGENCE] Risk Governor & Hedge Policy
+                        # ------------------------------------------------------------------
+                        # 1. Risk Governor Veto Check
+                        if FLAGS.ENABLE_GOVERNOR:
+                            # Get Account Info for PnL %
+                            try:
+                                acct = await self.broker.get_account_info()
+                                balance = float(acct.get('balance', 1.0))
+                                daily_pnl = self.session_stats.get("total_profit", 0.0)
+                                daily_pnl_pct = (daily_pnl / balance) * 100.0 if balance > 0 else 0.0
+                            except Exception:
+                                daily_pnl_pct = 0.0
+
+                            veto, veto_reason = self._governor.veto({
+                                "daily_pnl_pct": daily_pnl_pct,
+                                "total_exposure": sum(p.volume for p in symbol_positions),
+                                "spread_points": (tick['ask'] - tick['bid']) / props['point_size'],
+                                "news_now": self.news_filter.is_news_event()
+                            })
+                            if veto:
+                                logger.warning(f"[RISK-VETO] Hedge blocked by Governor: {veto_reason}")
+                                print(f">>> [RISK-VETO] Hedge blocked: {veto_reason}", flush=True)
+                                return False
+
+                        # 2. Hedge Policy Decision
+                        tp_price = 0.0
+                        sl_price = 0.0
+                        confidence = 0.0
+                        policy_reasons = []
+                        
+                        if FLAGS.ENABLE_POLICY:
+                            # Construct features for the policy
+                            spread_points = (tick['ask'] - tick['bid']) / props['point_size']
+                            atr_points = current_atr / props['point_size']
+                            
+                            # Calculate Trend Slope (using MarketData)
+                            try:
+                                trend_strength = self.market_data.calculate_trend_strength(symbol)
+                            except Exception:
+                                trend_strength = 0.0
+
+                            # [AI INTELLIGENCE] Calculate Volatility Z-Score
+                            # We need a history of ATR or Volume to calculate Z-Score.
+                            # Since we don't have a long history in memory here, we can use a simplified
+                            # relative volume metric if available, or default to 0.0 safely.
+                            # Ideally, MarketData should track this. For now, we use a safe proxy.
+                            vol_z_score = 0.0
+                            if hasattr(self.market_data, 'get_volume_z_score'):
+                                vol_z_score = self.market_data.get_volume_z_score(symbol)
+
+                            features = {
+                                "regime_trend": simple_regime_trend(trend_strength, atr_points),
+                                "breakout_quality": 0.5, # Placeholder - requires candle pattern analysis
+                                "structure_break": 0.0, # Placeholder - requires support/resistance levels
+                                "drawdown_urgency": min(1.0, current_drawdown / 1000.0), # Crude proxy
+                                "spread_atr": spread_atr(spread_points, atr_points),
+                                "vol_z": vol_z_score,
+                            }
+                            context = {
+                                "side": hedge_type.lower(),
+                                "price": tick['bid'] if hedge_type == "SELL" else tick['ask'],
+                                "atr": current_atr,
+                                "open_hedges": len(symbol_positions),
+                            }
+                            
+                            decision = self._hedge_policy.decide(features, context)
+                            
+                            if not decision["hedge"]:
+                                # >>> [INTELLIGENCE INJECTION] <<<
+                                # Execute Plan B instead of just skipping
+                                await self._handle_blocked_hedge_strategy(symbol, symbol_positions, decision, tick)
+
+                                logger.info(f"[HEDGE-SKIP] Policy declined hedge: {decision['reasons']}")
+                                if FLAGS.ENABLE_TELEMETRY:
+                                    self._telemetry.write(DecisionRecord(
+                                        ts=time.time(), symbol=symbol, action="hedge-skip", side=hedge_type,
+                                        price=context["price"], lots=hedge_lot,
+                                        features=features, context=context, decision=decision
+                                    ))
+                                return False
+                                
+                            # Apply Policy Outputs
+                            tp_price = decision["tp_price"]
+                            sl_price = decision["sl_price"]
+                            confidence = decision["confidence"]
+                            policy_reasons = decision["reasons"]
+                            ai_reason += f" | Conf: {confidence:.2f}"
+
                         # Construct AI Reason for User
                         if stabilizer_triggered:
                             ai_reason = "STABILIZER PROTOCOL: Drawdown > 1.5x ATR. Emergency Hedge."
@@ -1705,13 +1881,25 @@ class TradingEngine:
                             'symbol': symbol,
                             'lots': hedge_lot,
                             'entry_price': tick['bid'] if hedge_type == "SELL" else tick['ask'],
-                            'tp_price': "Dynamic", # Changed from 0.0
+                            'tp_price': tp_price if tp_price > 0 else "Dynamic", 
                             'tp_atr': 0.0,
-                            'tp_pips': "Bucket", # Changed from 0.0
+                            'tp_pips': "Bucket", 
                             'hedges': [], # No nested hedges
                             'atr_pips': current_atr * 10000, # Approx
-                            'reasoning': f"[HEDGE {len(symbol_positions)}] {ai_reason}"
+                            'reasoning': f"[HEDGE {len(symbol_positions)}] {ai_reason}",
+                            'confidence': confidence,
+                            'reasons': policy_reasons
                         })
+                        
+                        if FLAGS.ENABLE_TELEMETRY:
+                            self._telemetry.write(DecisionRecord(
+                                ts=time.time(), symbol=symbol, action="hedge-open", side=hedge_type,
+                                price=tick['bid'] if hedge_type == "SELL" else tick['ask'], 
+                                lots=hedge_lot,
+                                features=features if FLAGS.ENABLE_POLICY else {},
+                                context=context if FLAGS.ENABLE_POLICY else {},
+                                decision={"tp_price": tp_price, "sl_price": sl_price, "confidence": confidence, "reasons": policy_reasons}
+                            ))
                         
                         # Execute directly via broker to bypass standard entry checks
                         self.broker.execute_order(

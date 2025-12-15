@@ -293,6 +293,67 @@ class MarketDataManager:
             return self.macro_eye.get_macro_state()
         return [0.0, 0.0]
 
+    def calculate_trend_strength(self, symbol: str) -> float:
+        """
+        Calculates the strength of the current trend.
+        Returns:
+            float: -1.0 (Strong Downtrend) to +1.0 (Strong Uptrend)
+        """
+        candles = self.candles.get_history(symbol)
+        if not candles or len(candles) < 20:
+            return 0.0
+
+        # Simple Linear Regression Slope on last 10 closes
+        closes = [c['close'] for c in candles[-10:]]
+        n = len(closes)
+        
+        # X axis is just 0, 1, 2...
+        sum_x = sum(range(n))
+        sum_y = sum(closes)
+        sum_xy = sum(i * closes[i] for i in range(n))
+        sum_xx = sum(i * i for i in range(n))
+        
+        slope = (n * sum_xy - sum_x * sum_y) / (n * sum_xx - sum_x * sum_x) if (n * sum_xx - sum_x * sum_x) != 0 else 0
+        
+        # Normalize slope by price (percentage change per bar)
+        current_price = closes[-1]
+        if current_price == 0: return 0.0
+        
+        norm_slope = (slope / current_price) * 10000 # Basis points per bar
+        
+        # Clamp to -1.0 to 1.0 (Assuming > 5 bps per bar is strong)
+        strength = max(-1.0, min(1.0, norm_slope / 5.0))
+        
+        return strength
+
+    def get_volume_z_score(self, symbol: str) -> float:
+        """
+        Calculates the Z-Score of the current volume relative to recent history.
+        High Z-Score (> 2.0) indicates anomalous activity (breakout/climax).
+        """
+        candles = self.candles.get_history(symbol)
+        if not candles or len(candles) < 50:
+            return 0.0
+            
+        # Use last 50 candles for baseline, excluding the current forming candle
+        history_vols = [c['tick_volume'] for c in candles[-51:-1]]
+        if not history_vols:
+            return 0.0
+            
+        current_vol = candles[-1]['tick_volume']
+        
+        avg_vol = sum(history_vols) / len(history_vols)
+        
+        # Calculate StdDev
+        variance = sum((v - avg_vol) ** 2 for v in history_vols) / len(history_vols)
+        std_dev = variance ** 0.5
+        
+        if std_dev == 0:
+            return 0.0
+            
+        z_score = (current_vol - avg_vol) / std_dev
+        return z_score
+
     def get_order_book_imbalance(self, symbol: str) -> float:
         """
         HFT Layer 7: Calculates Order Book Imbalance (OBI).
