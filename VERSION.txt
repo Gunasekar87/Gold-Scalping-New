@@ -1,4 +1,10 @@
-﻿v5.2.0 (HIGHEST INTELLIGENCE & PLAN B) - 2025-12-15
+﻿v5.2.1 (VIRTUAL EXIT & SAFETY NET) - 2025-12-15
+- [CRITICAL] Virtual Exit Only: Disabled broker-side Take Profit (TP) placement to prevent conflicts.
+- [FIX] NewsFilter Crash: Fixed method name mismatch (`can_trade` -> `should_trade`).
+- [NEW] Doomsday Protocol: Added global equity hard stop (20% drawdown).
+- [CLEANUP] Removed dead code (`calculate_optimized_tp`) to streamline logic.
+
+v5.2.0 (HIGHEST INTELLIGENCE & PLAN B) - 2025-12-15
 - [NEW] Hedge Policy: Scored decision engine for hedging (Regime + Trend + Volatility).
 - [NEW] Risk Governor: Circuit breakers for Daily Loss, Exposure, and News events.
 - [NEW] Plan B (Reversion Escape): Auto-exit at break-even if hedging is blocked (Fakeout/Risk Veto).

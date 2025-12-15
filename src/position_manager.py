@@ -1481,72 +1481,20 @@ class PositionManager:
 
     async def update_bucket_tp(self, broker, symbol: str, bucket_id: str, current_price: float = None):
         """
-        Updates the TP for all positions in a bucket using Dynamic Profit Decay.
-        INTELLIGENCE UPGRADE: Validates TP against StopLevel and Direction to prevent 'Invalid stops'.
+        Updates the Take Profit for all positions in a bucket.
+        FORCE VIRTUAL EXIT ONLY: Clears any broker-side TP to 0.0.
         """
         positions = self.get_positions_in_bucket(bucket_id)
         if not positions:
             return
 
-        # Get current market price
-        if current_price is None:
-            return
-            
-        # Calculate the new "Survival" TP
-        # Use dot notation for Position objects
-        first_pos = positions[0]
-        new_tp = self.calculate_optimized_tp(positions, current_price)
-        
-        # [FIX] Get Stop Level and Ask Price from MT5 for validation
-        stop_level_dist = 0.0
-        current_ask = current_price # Default fallback
-        try:
-            symbol_info = mt5.symbol_info(symbol)
-            if symbol_info:
-                stop_level_dist = symbol_info.trade_stops_level * symbol_info.point
-            
-            tick = mt5.symbol_info_tick(symbol)
-            if tick:
-                current_ask = tick.ask
-        except Exception:
-            pass
-        
         # Apply to all trades in the bucket
         for pos in positions:
-            # Only update if TP is different (save API calls)
+            # Only update if TP is not already 0.0
             current_tp = getattr(pos, 'tp', 0.0)
-            if abs(current_tp - new_tp) > 0.01:
-                
-                # [CRITICAL VALIDATION] Check if TP is valid for this specific trade direction
-                is_valid_tp = False
-                
-                # Ensure we have valid price data
-                if current_price is None or current_price <= 0:
-                    continue
-                    
-                if pos.type == 0: # BUY
-                    # TP must be > Current Bid + StopLevel
-                    # Use a slightly larger buffer (2x StopLevel) to be safe against spread fluctuations
-                    min_allowed_tp = current_price + max(stop_level_dist, 0.01)
-                    if new_tp > min_allowed_tp:
-                        is_valid_tp = True
-                else: # SELL
-                    # TP must be < Current Ask - StopLevel
-                    # Use a slightly larger buffer
-                    max_allowed_tp = current_ask - max(stop_level_dist, 0.01)
-                    if new_tp < max_allowed_tp:
-                        is_valid_tp = True
-                
-                # If invalid (e.g. hedging leg that is losing), set TP to 0.0 (Virtual Exit only)
-                target_tp = new_tp if is_valid_tp else 0.0
-                
-                # Skip if we are trying to set 0.0 and it's already 0.0
-                if target_tp == 0.0 and current_tp == 0.0:
-                    continue
-
+            if current_tp != 0.0:
                 try:
                     # Use broker adapter to modify position
-                    # Convert integer type to string for execute_order
                     order_type_str = "BUY" if pos.type == 0 else "SELL"
                     broker.execute_order(
                         symbol=pos.symbol, 
@@ -1554,111 +1502,15 @@ class PositionManager:
                         volume=pos.volume, 
                         order_type=order_type_str, 
                         sl=pos.sl, 
-                        tp=target_tp, 
+                        tp=0.0, # FORCE 0.0
                         ticket=pos.ticket
                     )
-                    if target_tp > 0:
-                        logger.info(f"[SURVIVAL] Updated TP for Ticket {pos.ticket} to {target_tp}")
-                    else:
-                        logger.debug(f"[SURVIVAL] Cleared TP for Ticket {pos.ticket} (Virtual Exit Only)")
+                    logger.debug(f"[SURVIVAL] Cleared TP for Ticket {pos.ticket} (Virtual Exit Only)")
                         
                 except Exception as e:
-                    logger.error(f"Failed to update TP for {pos.ticket}: {e}")
+                    logger.error(f"Failed to clear TP for {pos.ticket}: {e}")
 
-    def calculate_optimized_tp(self, positions, current_price):
-        """
-        SURVIVAL MODE: Calculates a dynamic TP based on Net Equity Break-Even.
-        Correctly handles hedged positions (mixed Buy/Sell).
-        """
-        if not positions:
-            return 0.0
 
-        # Calculate Net Volume and Weighted Entry
-        net_vol = 0.0
-        sum_entry_cost = 0.0
-        
-        symbol = positions[0].symbol
-        
-        for p in positions:
-            # 0=BUY (Positive Vol), 1=SELL (Negative Vol)
-            sign = 1 if p.type == 0 else -1
-            net_vol += (p.volume * sign)
-            sum_entry_cost += (p.price_open * p.volume * sign)
-
-        # Determine slippage buffer based on symbol
-        slippage_buffer = 0.0
-        if "XAU" in symbol or "GOLD" in symbol:
-            # [TUNED] Increased to 0.75 (75 pips/cents) for Gold to guarantee profit despite volatility
-            slippage_buffer = 0.75 
-        elif "JPY" in symbol:
-            slippage_buffer = 0.05 # 5 pips buffer for JPY
-        else:
-            slippage_buffer = 0.0005 # 5 pips for others
-
-        # [FIX] Get Stop Level and Ask Price from MT5
-        stop_level_dist = 0.0
-        current_ask = current_price # Default fallback
-        try:
-            symbol_info = mt5.symbol_info(symbol)
-            if symbol_info:
-                stop_level_dist = symbol_info.trade_stops_level * symbol_info.point
-            
-            tick = mt5.symbol_info_tick(symbol)
-            if tick:
-                current_ask = tick.ask
-        except Exception:
-            pass
-
-        # Target Profit (in Price units)
-        # We want Net PnL > Target
-        # PnL = (ExitPrice * NetVol) - SumEntryCost
-        # Target = (ExitPrice * NetVol) - SumEntryCost
-        # ExitPrice = (Target + SumEntryCost) / NetVol
-        
-        count = len(positions)
-        total_raw_vol = sum(p.volume for p in positions)
-        
-        # Dynamic Profit Target (in currency units per lot approx)
-        # If we have 1 lot net, 0.40 price move = 0.40 profit (if contract=1)
-        # We'll stick to price distance logic
-        
-        # [TUNED FOR GOLD] Increased target distances to ensure profitability
-        if count >= 5 or total_raw_vol > 1.0:
-            target_dist = 0.10 + slippage_buffer # Was 0.05
-        elif count >= 3:
-            target_dist = 0.30 + slippage_buffer # Was 0.20
-        else:
-            target_dist = 0.60 + slippage_buffer # Was 0.40
-
-        # If perfectly hedged, we can't set a TP based on price movement
-        if abs(net_vol) < 0.001:
-            return 0.0
-
-        # Calculate Break-Even Price
-        # BE_Price = SumEntryCost / NetVol
-        be_price = sum_entry_cost / net_vol
-        
-        # Add Profit Target
-        # If Net Long (NetVol > 0), we want Price > BE
-        # If Net Short (NetVol < 0), we want Price < BE
-        
-        if net_vol > 0: # Net Long (Exit at Bid)
-            final_tp = be_price + target_dist
-            
-            # Validation: TP must be > Current Bid + StopLevel
-            min_tp = current_price + stop_level_dist
-            if final_tp < min_tp:
-                 final_tp = min_tp
-                 
-        else: # Net Short (Exit at Ask)
-            final_tp = be_price - target_dist
-            
-            # Validation: TP must be < Current Ask - StopLevel
-            max_tp = current_ask - stop_level_dist
-            if final_tp > max_tp:
-                final_tp = max_tp
-
-        return round(final_tp, 2)
 
     async def execute_ai_sniper_logic(self, bucket_id: str, oracle, broker, market_data: Dict) -> bool:
         """
