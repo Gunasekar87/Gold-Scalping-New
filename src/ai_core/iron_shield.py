@@ -135,9 +135,13 @@ class IronShield:
         # 4. Final Selection: Pick the largest of Math vs AI
         final_lot = max(math_lot, min_overpower_lot)
 
-        # 5. Safety Clamp (Max 5x initial)
+        # 5. Safety Clamp (Max 2.5x initial - Anti-Martingale Brake)
         initial_lot = first_pos.get('volume') if isinstance(first_pos, dict) else getattr(first_pos, 'volume')
-        max_allowed = initial_lot * 5.0
+        
+        # [FIX] Cap the multiplier. Never go full martingale.
+        # Previously this could go too high. Now capped at 2.5x max.
+        max_multiplier = 2.5
+        max_allowed = initial_lot * max_multiplier
         
         final_lot = min(final_lot, max_allowed)
         final_lot = max(final_lot, symbol_step) # Ensure at least min step
@@ -146,6 +150,20 @@ class IronShield:
         final_lot = round(final_lot / symbol_step) * symbol_step
         
         return final_lot
+
+    def should_trigger_recovery(self, trend_strength, rsi_value, sentiment_score):
+        """
+        [FIX] Veto recovery trades if the trend is crashing against us.
+        """
+        # If Trend is Strong Down (-0.7) and we want to Buy... FORBID IT.
+        if trend_strength < -0.6:
+            return False # Too dangerous to catch a falling knife
+            
+        # Standard RSI checks
+        if rsi_value < 30 or rsi_value > 70:
+            return True
+            
+        return False
 
     def calculate_entry_lot(self, equity, confidence=1.0, atr_value=0.0, trend_strength=0.0):
         """
@@ -192,6 +210,13 @@ class IronShield:
         
         # Ensure we are within bounds
         final_lot = max(self.base_lot, safe_lot)
+        
+        # [FIX] Absolute Safety Cap based on Equity
+        # Example: $3000 equity -> Max lot 0.30. 
+        # The 0.68 trade on a $3000 account was mathematically reckless.
+        max_allowed_lot = round(equity / 10000.0, 2) * 10.0 # e.g. 3000 -> 0.30
+        
+        final_lot = min(final_lot, max_allowed_lot)
         
         # Dynamic Cap: We allow up to 50 lots for high equity accounts
         final_lot = min(final_lot, 50.0)

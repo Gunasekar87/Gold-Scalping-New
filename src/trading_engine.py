@@ -28,6 +28,7 @@ from .infrastructure.async_database import (
     AsyncDatabaseManager, AsyncDatabaseQueue, TickData, CandleData, TradeData
 )
 from .utils.trading_logger import TradingLogger, DecisionTracker, format_pips
+from .utils.news_filter import NewsFilter
 
 # [AI INTELLIGENCE] New Policy & Governance Modules
 from src.config.settings import FLAGS, POLICY as _PTUNE, RISK as _RLIM
@@ -347,6 +348,11 @@ class TradingEngine:
         # Check if algo trading is allowed
         if not self.broker.is_trade_allowed():
             return False, "Algo trading disabled"
+
+        # [AI INTELLIGENCE] Check News Filter
+        # Prevent entries during high-impact news events
+        if self.news_filter and not self.news_filter.should_trade():
+            return False, "High-impact news event imminent or active"
 
         # Check for recent bucket closes
         symbol = signal.symbol
@@ -937,10 +943,14 @@ class TradingEngine:
                 for p in positions
             )
             
-            # Target: Just enough to cover costs and a tiny profit (e.g. $0.50)
-            # This ensures "Nil Loss" without greed.
-            if net_profit > 0.50: 
-                logger.info(f"🚀 [PLAN B] Reversion Escape Successful! Net Profit: ${net_profit:.2f}. Closing all positions.")
+            # [INTELLIGENCE FIX] Dynamic Slippage Buffer
+            # Fixed $0.50 is risky for larger lots. We need a buffer proportional to volume.
+            # Aim for $10.00 per lot (approx 10 pips on Gold) to cover execution slippage.
+            total_vol = sum(p.get('volume', 0.0) if isinstance(p, dict) else p.volume for p in positions)
+            slippage_buffer = max(0.50, total_vol * 10.0)
+            
+            if net_profit > slippage_buffer: 
+                logger.info(f"🚀 [PLAN B] Reversion Escape Successful! Net Profit: ${net_profit:.2f} (Buffer: ${slippage_buffer:.2f}). Closing all positions.")
                 bucket_closed = await self.position_manager.close_bucket_positions(self.broker, bucket_id, symbol)
                 if bucket_closed:
                     setattr(self, f"_plan_b_active_{symbol}", False)
@@ -980,8 +990,9 @@ class TradingEngine:
             
             # [HIGHEST INTELLIGENCE] LAYER 2: CALCULATED RECOVERY
             # Check if bucket is stuck > 30 mins and needs a muscle move
+            # Now includes IronShield for Trend Veto
             calculated_recovery_executed = await self.position_manager.execute_calculated_recovery(
-                self.broker, bucket_id, market_data
+                self.broker, bucket_id, market_data, self.risk_manager.shield
             )
             if calculated_recovery_executed:
                 logger.info(f"[MUSCLE] Calculated Recovery Executed for {bucket_id}")
@@ -1059,6 +1070,43 @@ class TradingEngine:
         }
         logger.info("Session statistics reset")
 
+    async def _check_global_safety(self):
+        """
+        [DOOMSDAY PROTOCOL] Global Equity Stop Loss.
+        If Drawdown > 20%, CLOSE EVERYTHING immediately.
+        """
+        if getattr(self, '_safety_lock', False):
+            return # Already locked
+
+        account_info = self.broker.get_account_info()
+        if not account_info:
+            return
+
+        balance = account_info.get('balance', 0.0)
+        equity = account_info.get('equity', 0.0)
+        
+        if balance <= 0: return
+
+        drawdown_pct = (balance - equity) / balance
+        
+        # HARDCODED SAFETY LIMIT: 20%
+        if drawdown_pct > 0.20:
+            logger.critical(f"[DOOMSDAY] GLOBAL EQUITY STOP TRIGGERED! Drawdown: {drawdown_pct*100:.1f}%")
+            print(f">>> [CRITICAL] DOOMSDAY PROTOCOL ACTIVATED. CLOSING ALL TRADES.", flush=True)
+            
+            self._safety_lock = True
+            
+            # Close all positions
+            positions = self.broker.get_positions()
+            if positions:
+                for pos in positions:
+                    ticket = pos.get('ticket') if isinstance(pos, dict) else pos.ticket
+                    self.broker.close_position(ticket)
+                    logger.critical(f"[DOOMSDAY] Closed ticket {ticket}")
+            
+            # Raise flag to stop bot
+            raise Exception("Global Equity Stop Loss Triggered")
+
     async def run_trading_cycle(self, strategist, shield, ppo_guardian,
                                nexus=None, oracle=None) -> None:
         """
@@ -1074,6 +1122,9 @@ class TradingEngine:
         symbol = self.config.symbol
 
         try:
+            # [SAFETY FIRST] Check Global Equity Stop
+            await self._check_global_safety()
+
             # Get market data
             # print(f">>> [DEBUG] Fetching tick for {symbol}...", flush=True)
             tick = self.market_data.get_tick_data(symbol)
@@ -1153,8 +1204,6 @@ class TradingEngine:
                     # [USER REQUEST] DISABLED CIRCUIT BREAKER FOR INITIAL ENTRIES
                     # The user requested that enhancements apply ONLY to hedging/recovery.
                     # We log the Oracle's opinion but do NOT block the trade.
-                    # if oracle_signal == "HOLD": ... (Disabled)
-                    # if oracle_signal == "HOLD": ... (Disabled)
 
             # --- HIERARCHICAL AI DECISION LOGIC (v5.0) ---
             # 1. Supervisor: Detect Regime

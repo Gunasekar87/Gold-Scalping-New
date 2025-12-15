@@ -303,7 +303,7 @@ class PositionManager:
             
         return False
 
-    async def execute_calculated_recovery(self, broker, bucket_id: str, market_data: Dict) -> bool:
+    async def execute_calculated_recovery(self, broker, bucket_id: str, market_data: Dict, shield=None) -> bool:
         """
         [GOD MODE] LIQUIDITY VACUUM RECOVERY (The Muscle Upgrade)
         Uses Institutional Market Structure to time recovery entries.
@@ -348,6 +348,17 @@ class PositionManager:
             # STRATEGY: Smart Averaging (Add to position at structure)
             # If Net Long (>0), we BUY. If Net Short (<0), we SELL.
             action = "BUY" if net_vol > 0 else "SELL" 
+            
+            # [FIX] Trend Veto (IronShield)
+            # If we are buying into a crash, ABORT.
+            if shield:
+                trend_strength = market_data.get('trend_strength', 0.0)
+                if action == "BUY" and trend_strength < -0.6:
+                    logger.warning(f"[GOD MODE] Recovery BUY blocked. Trend Crash ({trend_strength:.2f})")
+                    return False
+                if action == "SELL" and trend_strength > 0.6:
+                    logger.warning(f"[GOD MODE] Recovery SELL blocked. Trend Rocket ({trend_strength:.2f})")
+                    return False
             
             if candles and len(candles) >= 20:
                 last_candle = candles[-1]
@@ -424,6 +435,22 @@ class PositionManager:
         # 4. Execute Recovery Trade
         price = market_data.get('ask') if action == "BUY" else market_data.get('bid')
         
+        # [FIX] Price Sanity Check
+        # Prevent "Suicide Recovery" at bad prices
+        ask = market_data.get('ask')
+        bid = market_data.get('bid')
+        
+        if action == "BUY":
+            # Check 1: Spread (Proxy for bad liquidity/spikes)
+            if (ask - bid) > 1.0: # > 100 points (Gold)
+                logger.warning(f"🛑 [SAFETY] Recovery BUY blocked. Spread too high: {ask-bid:.2f}")
+                return False
+            # Check 2: Stale Tick
+            tick_ts = market_data.get('time', 0)
+            if tick_ts > 0 and (time.time() - tick_ts > 10.0):
+                 logger.warning(f"🛑 [SAFETY] Recovery BUY blocked. Stale Tick ({time.time() - tick_ts:.1f}s old)")
+                 return False
+        
         logger.info(f"[GOD MODE] Executing Liquidity Recovery: {action} {recovery_volume} lots @ {price}")
         
         result = broker.execute_order(
@@ -443,6 +470,12 @@ class PositionManager:
                 if bucket_id in self.bucket_stats:
                     self.bucket_stats[bucket_id].last_update = time.time()
                     self.bucket_stats[bucket_id].last_recovery_time = time.time()
+            
+            # [FIX] Update TPs immediately for the new bucket composition
+            # This ensures we don't leave stale (low) TPs on the broker
+            logger.info(f"[GOD MODE] Updating Bucket TPs after recovery trade...")
+            await self.update_bucket_tp(broker, symbol, bucket_id, price)
+
             return True
             
         return False
@@ -1554,8 +1587,9 @@ class PositionManager:
 
         # Determine slippage buffer based on symbol
         slippage_buffer = 0.0
-        if "XAU" in symbol:
-            slippage_buffer = 0.50 # [TUNED] Increased to 50 cents for Gold (covers spread + slippage)
+        if "XAU" in symbol or "GOLD" in symbol:
+            # [TUNED] Increased to 0.75 (75 pips/cents) for Gold to guarantee profit despite volatility
+            slippage_buffer = 0.75 
         elif "JPY" in symbol:
             slippage_buffer = 0.05 # 5 pips buffer for JPY
         else:
