@@ -303,27 +303,21 @@ class PositionManager:
 
     async def execute_calculated_recovery(self, broker, bucket_id: str, market_data: Dict) -> bool:
         """
-        HIGHEST INTELLIGENCE LAYER 2: CALCULATED RECOVERY (THE MUSCLE)
-        If a bucket is stuck > 30 mins, execute a recovery trade to break even + profit.
+        [GOD MODE] LIQUIDITY VACUUM RECOVERY (The Muscle Upgrade)
+        Uses Institutional Market Structure to time recovery entries.
+        Replaces blind hedging/grid with precision structure-based averaging.
         """
-        # 1. Gather Data under Lock
         with self._lock:
             if bucket_id not in self.bucket_stats:
                 return False
                 
             stats = self.bucket_stats[bucket_id]
             
-            # Check Duration (Stuck Trade?)
-            duration_mins = (time.time() - stats.open_time) / 60
-            if duration_mins < 15:
-                # logger.debug(f"[MUSCLE] Bucket {bucket_id} too young: {duration_mins:.1f}m < 15m")
-                return False # Not stuck yet
-                
-            # Check if we already tried recovery recently (cooldown)
-            # [FIX] Use specific recovery timestamp, not generic update time
+            # 1. Cooldown & Status Checks
+            # [FIX] Use specific recovery timestamp
             time_since_recovery = time.time() - getattr(stats, 'last_recovery_time', 0.0)
             if time_since_recovery < 300: # 5 mins cooldown
-                logger.info(f"[MUSCLE] Cooldown active for {bucket_id}: {time_since_recovery:.0f}s < 300s")
+                # logger.debug(f"[GOD MODE] Cooldown active for {bucket_id}")
                 return False
 
             positions = [self.active_positions[t] for t in stats.positions if t in self.active_positions]
@@ -334,39 +328,100 @@ class PositionManager:
             net_pnl = sum(p.profit for p in positions) + sum(p.swap for p in positions) + sum(p.commission for p in positions)
             
             if net_pnl >= 0:
-                # logger.debug(f"[MUSCLE] Bucket {bucket_id} is in profit (${net_pnl:.2f}). No recovery needed.")
                 return False # Not in loss
                 
             deficit = abs(net_pnl)
-            
-            # Prepare execution data
             symbol = positions[0].symbol
+            # Net Volume: Positive = Net Long, Negative = Net Short
             net_vol = sum(p.volume if p.type == 0 else -p.volume for p in positions)
             
-        # 2. Calculate Recovery Volume (Outside Lock)
-        target_profit = 10.0 # Aim for small profit
-        total_needed = deficit + target_profit
+            # 2. GOD MODE: Structure Analysis
+            candles = market_data.get('candles', [])
+            atr = market_data.get('atr', 0.0)
+            current_price = market_data.get('current_price', 0.0)
+            
+            # Default to "Wait"
+            signal = False
+            # STRATEGY: Smart Averaging (Add to position at structure)
+            # If Net Long (>0), we BUY. If Net Short (<0), we SELL.
+            action = "BUY" if net_vol > 0 else "SELL" 
+            
+            if candles and len(candles) >= 20:
+                last_candle = candles[-1]
+                # A. Volatility Compression (The Coil)
+                # Don't enter if market is exploding against us (Expansion)
+                candle_range = last_candle['high'] - last_candle['low']
+                # Allow entry if range is normal (<= 1.5 ATR). Avoid massive impulse candles (> 2.0 ATR).
+                is_compressed = candle_range < (atr * 2.0) 
+                
+                # B. Liquidity Sweep (The Level)
+                # Find 20-period High/Low (Donchian Channel)
+                highs = [c['high'] for c in candles[-20:]]
+                lows = [c['low'] for c in candles[-20:]]
+                lowest_low = min(lows)
+                highest_high = max(highs)
+                
+                if action == "BUY": # We are Long, Price is dropping
+                    # Enter only if we swept the low (Liquidity Vacuum)
+                    # Price is near or below lowest low
+                    # "Near" = within 0.5 ATR
+                    is_at_structure = current_price <= (lowest_low + atr * 0.5)
+                    
+                    # Reversal Candle (Green) or Hammer
+                    # Close >= Open (Green) OR Close > Low + 0.6*(High-Low) (Hammer)
+                    is_green = last_candle['close'] >= last_candle['open']
+                    is_hammer = (last_candle['close'] - last_candle['low']) > 0.6 * (last_candle['high'] - last_candle['low'])
+                    is_reversal = is_green or is_hammer
+                    
+                    if is_at_structure and is_reversal and is_compressed:
+                        signal = True
+                        logger.info(f"[GOD MODE] BUY Signal: Liquidity Sweep @ {lowest_low:.2f} | Deficit: ${deficit:.2f}")
+                        
+                else: # We are Short, Price is rising
+                    # Enter only if we swept the high
+                    is_at_structure = current_price >= (highest_high - atr * 0.5)
+                    
+                    # Reversal Candle (Red) or Shooting Star
+                    is_red = last_candle['close'] <= last_candle['open']
+                    is_star = (last_candle['high'] - last_candle['close']) > 0.6 * (last_candle['high'] - last_candle['low'])
+                    is_reversal = is_red or is_star
+                    
+                    if is_at_structure and is_reversal and is_compressed:
+                        signal = True
+                        logger.info(f"[GOD MODE] SELL Signal: Liquidity Sweep @ {highest_high:.2f} | Deficit: ${deficit:.2f}")
+            else:
+                # Fallback if no candles (shouldn't happen with update)
+                # Use simple time-based check
+                duration_mins = (time.time() - stats.open_time) / 60
+                if duration_mins > 30:
+                    signal = True
+                    logger.info(f"[GOD MODE] Fallback: Time-based recovery (>30m)")
+
+            if not signal:
+                return False
+
+        # 3. Calculate Recovery Volume (Outside Lock)
+        # Aim to recover 50% of deficit with a 3.0 swing (Gold)
+        target_recovery = deficit * 0.5
+        swing_price = 3.00 
+        contract_size = 100 
         
-        swing_price = 3.00 # Standard Gold Swing
-        contract_size = 100 # Gold
-        
-        recovery_volume = total_needed / (swing_price * contract_size)
+        recovery_volume = target_recovery / (swing_price * contract_size)
         recovery_volume = round(recovery_volume, 2)
         
-        # Safety Caps
+        # Smart Sizing: Don't exceed 1.0x existing volume (Martingale Limit)
+        total_existing_vol = sum(p.volume for p in positions)
+        if recovery_volume > total_existing_vol:
+            recovery_volume = total_existing_vol
+            
+        # Hard Caps
         if recovery_volume > 0.5: recovery_volume = 0.5 # Hard cap for safety
         if recovery_volume < 0.01: recovery_volume = 0.01
         
-        # 3. Determine Direction (Hedge the Loss)
-        if net_vol > 0: # Net Long
-            action = "SELL"
-            price = market_data.get('bid')
-        else: # Net Short
-            action = "BUY"
-            price = market_data.get('ask')
-            
         # 4. Execute Recovery Trade
-        logger.info(f"[MUSCLE] Executing Calculated Recovery for {bucket_id}. Deficit: ${deficit:.2f}. Vol: {recovery_volume} {action}")
+        price = market_data.get('ask') if action == "BUY" else market_data.get('bid')
+        
+        logger.info(f"[GOD MODE] Executing Liquidity Recovery: {action} {recovery_volume} lots @ {price}")
         
         result = broker.execute_order(
             action="OPEN",
@@ -376,7 +431,7 @@ class PositionManager:
             volume=recovery_volume,
             sl=0.0,
             tp=0.0,
-            comment="Calculated Recovery"
+            comment="Liquidity Recovery"
         )
         
         if result:
@@ -719,6 +774,20 @@ class PositionManager:
         # Atomic replacement under lock to prevent race conditions
         with self._lock:
             self.active_positions = new_positions
+            
+            # [SELF-HEALING] Scan for orphans and adopt them into buckets
+            # This ensures that if a manual trade or hedge appears, it is IMMEDIATELY managed.
+            for ticket, pos in self.active_positions.items():
+                bucket_id = pos.symbol
+                if bucket_id in self.bucket_stats and not self.bucket_stats[bucket_id].closed:
+                    stats = self.bucket_stats[bucket_id]
+                    if ticket not in stats.positions:
+                        stats.positions.append(ticket)
+                        stats.last_update = time.time()
+                        # Update the position state to match the bucket
+                        pos.state = stats.state 
+                        logger.info(f"[ADOPTION] Bucket {bucket_id} adopted orphan position #{ticket}")
+                        self._save_state()
 
     def mark_position_as_ghost(self, ticket: int) -> None:
         """

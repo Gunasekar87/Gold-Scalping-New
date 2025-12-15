@@ -834,6 +834,10 @@ class TradingEngine:
         # Prepare market data for intelligent scalping analysis
         atr_value = self.market_data.calculate_atr(symbol, 14)
         trend_strength = self.market_data.calculate_trend_strength(symbol, 20)
+        
+        # [GOD MODE] Fetch candles for Structure Analysis
+        candles = self.market_data.candles.get_history(symbol)
+        
         market_data = {
             'atr': atr_value,  # ATR in points
             'spread': abs(tick['ask'] - tick['bid']),  # Spread in points
@@ -841,7 +845,8 @@ class TradingEngine:
             'current_price': (tick['ask'] + tick['bid']) / 2,
             'bid': tick['bid'], # Explicit Bid
             'ask': tick['ask'], # Explicit Ask
-            'point': point  # Point value for pip calculations
+            'point': point,  # Point value for pip calculations
+            'candles': candles # Pass full history for structure analysis
         }
 
         # Periodic position status update (every 5 seconds) to show AI is monitoring

@@ -1,4 +1,16 @@
-﻿v5.1.1 (STABILITY & DOCS) - 2025-12-12
+﻿v5.1.3 (GOD MODE & SELF-HEALING) - 2025-12-15
+- [NEW] "God Mode" Liquidity Vacuum Recovery: Replaced simple time-based recovery with structure-based sniper logic.
+- [NEW] Self-Healing Adoption: Bot now automatically detects and adopts orphan trades into active buckets to ensure full closure.
+- [FIX] Enhanced bucket closure logic to prevent leaving trades behind.
+- [FIX] Improved market data pipeline to support full candle history for structure analysis.
+
+v5.1.2 (HEDGING LOGIC FIX) - 2025-12-15
+- Fixed "Split Bucket" issue: Buys and Sells now correctly grouped in one bucket.
+- Fixed "Invalid Stops" (10016): Improved TP validation logic.
+- Fixed "Muscle" Timer: Calculated Recovery now triggers correctly after 15 mins.
+- Tuned Gold TP: Increased minimum floor to 5 pips.
+
+v5.1.1 (STABILITY & DOCS) - 2025-12-12
 - [FIX] Runtime: Fixed UnboundLocalError in TradingEngine.
 - [FIX] Runtime: Fixed AttributeError in PositionManager.
 - [NEW] Momentum Exhaustion: Added Bollinger Band + RSI logic for smarter hedging.
