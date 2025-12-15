@@ -1,4 +1,13 @@
-﻿v5.1.3 (GOD MODE & SELF-HEALING) - 2025-12-15
+﻿v5.2.0 (HIGHEST INTELLIGENCE & PLAN B) - 2025-12-15
+- [NEW] Hedge Policy: Scored decision engine for hedging (Regime + Trend + Volatility).
+- [NEW] Risk Governor: Circuit breakers for Daily Loss, Exposure, and News events.
+- [NEW] Plan B (Reversion Escape): Auto-exit at break-even if hedging is blocked (Fakeout/Risk Veto).
+- [NEW] Telemetry: Full JSONL recording of AI decisions and blocked entries.
+- [NEW] Last Resort Close: Individual close retry loop for guaranteed exits.
+- [OPTIMIZED] Market Data: Added Linear Regression Trend & Volume Z-Score.
+- [FIXED] Telemetry logging for blocked entries.
+
+v5.1.3 (GOD MODE & SELF-HEALING) - 2025-12-15
 - [NEW] "God Mode" Liquidity Vacuum Recovery: Replaced simple time-based recovery with structure-based sniper logic.
 - [NEW] Self-Healing Adoption: Bot now automatically detects and adopts orphan trades into active buckets to ensure full closure.
 - [FIX] Enhanced bucket closure logic to prevent leaving trades behind.
