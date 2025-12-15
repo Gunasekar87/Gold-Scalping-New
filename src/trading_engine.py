@@ -745,7 +745,7 @@ class TradingEngine:
 
     async def process_position_management(self, symbol: str, positions: List[Dict],
                                   tick: Dict, point: float, shield, ppo_guardian,
-                                  nexus=None, rsi_value: float = 50.0) -> bool:
+                                  nexus=None, rsi_value: float = 50.0, oracle=None) -> bool:
         """
         Process position management for a symbol.
 
@@ -757,6 +757,7 @@ class TradingEngine:
             shield: IronShield instance
             ppo_guardian: PPO Guardian instance
             nexus: Optional NexusBrain instance
+            oracle: Optional Oracle instance (Layer 4)
 
         Returns:
             True if positions were managed (closed/opened)
@@ -775,6 +776,10 @@ class TradingEngine:
         
         if not positions:
             return False
+
+        # [CRITICAL FIX] Update PositionManager with latest broker data (Profit/Price)
+        # This ensures 'should_close_bucket' uses real-time PnL, not stale data.
+        self.position_manager.update_positions(positions)
 
         # Only log when we have multiple positions (actual bucket)
         if len(positions) > 1:
@@ -803,6 +808,27 @@ class TradingEngine:
                     logger.debug(f"[BUCKET] CREATED NEW: {bucket_id} for single position (enables TP/Zone tracking)")
         else:
             logger.debug(f"[BUCKET] REUSING EXISTING: {bucket_id} for {len(positions)} positions")
+
+        # [AI SNIPER] Check for Smart Unwind Opportunity
+        if oracle and len(positions) > 1 and bucket_id:
+             # Prepare market data history for Oracle
+             history = self.market_data.candles.get_history(symbol)
+             # Ensure we have enough history
+             if len(history) >= 30:
+                 volumes = [c.get('volume', 0) for c in history]
+                 prices = [c.get('close', 0) for c in history]
+                 
+                 sniper_data = {
+                     'prices': prices,
+                     'volumes': volumes
+                 }
+                 
+                 unwound = await self.position_manager.execute_ai_sniper_logic(
+                     bucket_id, oracle, self.broker, sniper_data
+                 )
+                 if unwound:
+                     logger.info(f"[SNIPER] Smart Unwind executed for {bucket_id}")
+                     return True # Positions changed
 
         # Check if bucket should be closed
         # Prepare market data for intelligent scalping analysis
@@ -901,6 +927,15 @@ class TradingEngine:
                 # For now, we rely on the standard zone recovery logic but with heightened awareness
                 # In future, we can call a specific self.risk_manager.execute_stabilizer_hedge()
             
+            # [HIGHEST INTELLIGENCE] LAYER 2: CALCULATED RECOVERY
+            # Check if bucket is stuck > 30 mins and needs a muscle move
+            calculated_recovery_executed = await self.position_manager.execute_calculated_recovery(
+                self.broker, bucket_id, market_data
+            )
+            if calculated_recovery_executed:
+                logger.info(f"[MUSCLE] Calculated Recovery Executed for {bucket_id}")
+                return True
+
             logger.info(f"[ZONE_CHECK] Bucket {bucket_id} not closed, checking zone recovery")
             
             # Convert Position objects to dictionaries for zone recovery
@@ -1003,9 +1038,22 @@ class TradingEngine:
             
             if not market_ok:
                 # [UI FEEDBACK] Log pause reason only when it changes to avoid spam
-                if reason != self.last_pause_reason:
+                # Special handling for "Spread too wide" to avoid spamming due to small pip changes
+                is_spread_issue = "Spread too wide" in reason
+                
+                should_log = False
+                if is_spread_issue:
+                    # Only log if we weren't already paused for spread
+                    if self.last_pause_reason is None or "Spread too wide" not in self.last_pause_reason:
+                        should_log = True
+                elif reason != self.last_pause_reason:
+                    should_log = True
+
+                if should_log:
                     logger.info(f"[PAUSED] TRADING PAUSED: {reason}")
-                    print(f">>> [PAUSED] {reason}", flush=True)
+                    # User requested to disable this from terminal log
+                    if not is_spread_issue:
+                        print(f">>> [PAUSED] {reason}", flush=True)
                     self.last_pause_reason = reason
                 return
             
@@ -1027,7 +1075,7 @@ class TradingEngine:
             
             if positions:
                 # MANAGEMENT MODE
-                await self._process_existing_positions(symbol, tick, shield, ppo_guardian, nexus)
+                await self._process_existing_positions(symbol, tick, shield, ppo_guardian, nexus, oracle)
                 return # STRICTLY RETURN - No new entries while positions exist
 
             # HUNTING MODE
@@ -1045,6 +1093,17 @@ class TradingEngine:
                     oracle_prediction, oracle_confidence = oracle.predict(history[-60:])
                     if oracle_confidence > 0.6:
                         logger.info(f"[ORACLE] Prediction: {oracle_prediction} ({oracle_confidence:.2f})")
+
+                    # [HIGHEST INTELLIGENCE] LAYER 1: REGIME DETECTION
+                    # Use Oracle's advanced math to double-check regime
+                    oracle_regime, oracle_signal = oracle.get_regime_and_signal(history[-60:])
+                    logger.info(f"[ORACLE] Regime: {oracle_regime} | Signal: {oracle_signal}")
+                    
+                    # [USER REQUEST] DISABLED CIRCUIT BREAKER FOR INITIAL ENTRIES
+                    # The user requested that enhancements apply ONLY to hedging/recovery.
+                    # We log the Oracle's opinion but do NOT block the trade.
+                    # if oracle_signal == "HOLD": ... (Disabled)
+                    # if oracle_signal == "HOLD": ... (Disabled)
 
             # --- HIERARCHICAL AI DECISION LOGIC (v5.0) ---
             # 1. Supervisor: Detect Regime
@@ -1288,7 +1347,7 @@ class TradingEngine:
 
             # Generate Clean Entry Summary
             summary = (
-                f"\n================= ENTRY SUMMARY =================\n"
+                f"\n>>> [AI ENTRY PLAN] <<<\n"
                 f"Initial Trade: {signal.action.value} {lot_size} lots @ {entry_price:.5f}\n"
                 f"Target:        Dynamic (Bucket Logic)\n"
                 f"Virtual TP:    {virtual_tp_price:.5f} (+{tp_pips:.1f} pips)\n"
@@ -1301,7 +1360,7 @@ class TradingEngine:
             
             # [FIX] Windows Console Compatibility - Force clean version on Windows
             clean_summary = (
-                f"\n=== ENTRY SUMMARY ===\n"
+                f"\n>>> [AI ENTRY PLAN] <<<\n"
                 f"Initial Trade: {signal.action.value} {lot_size} lots @ {entry_price:.5f}\n"
                 f"Target:        Dynamic (Bucket Logic)\n"
                 f"Virtual TP:    {virtual_tp_price:.5f} (+{tp_pips:.1f} pips)\n"
@@ -1391,7 +1450,7 @@ class TradingEngine:
                 "pip_size": 0.0001
             }
 
-    async def _process_existing_positions(self, symbol: str, tick: Dict, shield, ppo_guardian, nexus) -> bool:
+    async def _process_existing_positions(self, symbol: str, tick: Dict, shield, ppo_guardian, nexus, oracle=None) -> bool:
         """
         Process management for existing positions.
         Returns True if positions were managed (skipping new entries).
@@ -1417,6 +1476,9 @@ class TradingEngine:
         logger.debug(f"[PROCESS_POS] Found {len(symbol_positions)} positions for {symbol}")
 
         if symbol_positions:
+            # Sort positions by time to ensure correct order for hedging logic
+            symbol_positions.sort(key=lambda p: p.time)
+
             # Get symbol properties for point value
             # Get Symbol Properties for Math
             props = self._get_symbol_properties(symbol)
@@ -1433,6 +1495,43 @@ class TradingEngine:
             # We only intervene if the bucket is losing
             bucket_pnl = sum(p.profit for p in symbol_positions)
             
+            # [AI STATUS MONITOR] Periodic Log
+            current_time = time.time()
+            if current_time - self._last_position_status_time >= 30.0: # Every 30s
+                self._last_position_status_time = current_time
+                
+                # Determine Strategy
+                strategy_status = "Monitoring"
+                if bucket_pnl > 0:
+                    strategy_status = "Profit Protection (Trailing)"
+                elif len(symbol_positions) > 1:
+                    strategy_status = "Zone Recovery (Hedging)"
+                    if oracle:
+                        strategy_status += " + Sniper Watch"
+                
+                # Format PnL
+                pnl_str = f"${bucket_pnl:.2f}"
+                if bucket_pnl > 0: pnl_str = f"+{pnl_str}"
+                
+                status_msg = (
+                    f"\n>>> [AI STATUS MONITOR] <<<\n"
+                    f"Positions:    {len(symbol_positions)} Active\n"
+                    f"Net PnL:      {pnl_str}\n"
+                    f"Strategy:     {strategy_status}\n"
+                    f"Market:       RSI {current_rsi:.1f} | ATR {current_atr:.4f}\n"
+                    f"Action:       Holding & Analyzing Tick Data...\n"
+                    f"----------------------------------------------------"
+                )
+                
+                import sys
+                if sys.platform == 'win32':
+                    ui_logger.info(status_msg)
+                else:
+                    try:
+                        ui_logger.info(status_msg)
+                    except Exception:
+                        ui_logger.info(status_msg)
+
             # Check if we should use Elastic Defense OR fallback to Zone Recovery
             # If Elastic Defense says "WAIT" (should_hedge=False), we must ensure Zone Recovery doesn't override it blindly.
             # However, Zone Recovery handles the "Grid" logic.
@@ -1571,14 +1670,39 @@ class TradingEngine:
 
                         # Use UI Logger for visible terminal output
                         # [USER REQUEST] Standardized Hedge Log
+                        
+                        # Calculate estimated TP for display (Bucket Logic)
+                        # We can't know the exact TP until update_bucket_tp runs, but we can estimate it.
+                        # Usually it's Break-Even + Target.
+                        # For display, we can just say "Dynamic (Bucket)"
+                        
+                        # --- AI PLAN LOG ---
+                        hedge_plan_msg = (
+                            f"\n>>> [AI DEFENSE PLAN] ACTIVATING HEDGE <<<\n"
+                            f"Trigger:      {ai_reason}\n"
+                            f"Action:       OPEN {hedge_type} {hedge_lot} lots\n"
+                            f"Objective:    Neutralize Drawdown & Prepare for Recovery\n"
+                            f"Status:       EXECUTING NOW...\n"
+                            f"----------------------------------------------------"
+                        )
+                        import sys
+                        if sys.platform == 'win32':
+                            ui_logger.info(hedge_plan_msg)
+                        else:
+                            try:
+                                ui_logger.info(hedge_plan_msg)
+                            except Exception:
+                                ui_logger.info(hedge_plan_msg)
+                        # -------------------
+
                         TradingLogger.log_initial_trade(f"{symbol}_HEDGE_{len(symbol_positions)}", {
                             'action': hedge_type,
                             'symbol': symbol,
                             'lots': hedge_lot,
                             'entry_price': tick['bid'] if hedge_type == "SELL" else tick['ask'],
-                            'tp_price': 0.0, # Dynamic
+                            'tp_price': "Dynamic", # Changed from 0.0
                             'tp_atr': 0.0,
-                            'tp_pips': 0.0,
+                            'tp_pips': "Bucket", # Changed from 0.0
                             'hedges': [], # No nested hedges
                             'atr_pips': current_atr * 10000, # Approx
                             'reasoning': f"[HEDGE {len(symbol_positions)}] {ai_reason}"
@@ -1600,7 +1724,7 @@ class TradingEngine:
                         # Now that we have a new hedge, the "Survival TP" changes.
                         # We must update all trades in the bucket to the new target.
                         if bucket_id:
-                            await self.position_manager.update_bucket_tp(symbol, bucket_id, tick['bid'])
+                            await self.position_manager.update_bucket_tp(self.broker, symbol, bucket_id, tick['bid'])
                         return True # Managed
 
             # If Elastic Defense didn't trigger a hedge, we still check for EXITS (TP/SL)
@@ -1614,7 +1738,7 @@ class TradingEngine:
             
             positions_managed = await self.process_position_management(
                 symbol, [p.__dict__ for p in symbol_positions], tick,
-                point_value, shield, ppo_guardian, nexus, rsi_value=current_rsi
+                point_value, shield, ppo_guardian, nexus, rsi_value=current_rsi, oracle=oracle
             )
             
             logger.debug(f"[PROCESS_POS] process_position_management returned: {positions_managed}")

@@ -325,9 +325,9 @@ class AetherBot:
             print(">>> [DEBUG] Entering Main Loop...", flush=True)
             last_heartbeat = time.time()
             while not self.shutdown_requested:
-                # Heartbeat every 10 seconds
+                # Heartbeat every 10 seconds (Log only, no print)
                 if time.time() - last_heartbeat > 10.0:
-                    print(f">>> [SYSTEM] Heartbeat - Bot is alive. Time: {time.strftime('%H:%M:%S')}", flush=True)
+                    # print(f">>> [SYSTEM] Heartbeat - Bot is alive. Time: {time.strftime('%H:%M:%S')}", flush=True)
                     last_heartbeat = time.time()
 
                 await self._run_trading_cycle()
@@ -486,8 +486,3 @@ if __name__ == "__main__":
         logger.info("Bot stopped by user")
     except Exception as e:
         logger.error(f"Fatal error: {e}")
-try:
-    with open("config/settings.yaml", "r") as f:
-        config = yaml.safe_load(f)
-except Exception as e:
-    logger.error(f"Config Load Error: {e}")

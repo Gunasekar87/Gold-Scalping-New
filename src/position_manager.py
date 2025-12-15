@@ -110,6 +110,7 @@ class BucketStats:
     last_state_check: float = 0.0  # Last time state was validated
     exit_reason: str = ""  # Exit criteria that triggered close
     exit_confidence: float = 0.0  # AI confidence at exit trigger
+    last_recovery_time: float = 0.0  # Last time calculated recovery was executed
 
 
 class PositionManager:
@@ -188,6 +189,7 @@ class PositionManager:
                 # Provide defaults for new fields
                 stats_data.setdefault('last_state_check', time.time())
                 stats_data.setdefault('exit_reason', '')
+                stats_data.setdefault('last_recovery_time', 0.0)
                 
                 self.bucket_stats[bucket_id] = BucketStats(**stats_data)
 
@@ -219,7 +221,8 @@ class PositionManager:
                         'state': stats.state.value if hasattr(stats, 'state') else PositionState.UNKNOWN.value,
                         'mode': stats.mode.value if hasattr(stats, 'mode') else BucketMode.SINGLE.value,
                         'last_state_check': getattr(stats, 'last_state_check', time.time()),
-                        'exit_reason': getattr(stats, 'exit_reason', '')
+                        'exit_reason': getattr(stats, 'exit_reason', ''),
+                        'last_recovery_time': getattr(stats, 'last_recovery_time', 0.0)
                     }
                     for bid, stats in self.bucket_stats.items()
                 },
@@ -261,26 +264,27 @@ class PositionManager:
         [PHASE 2] The Stabilizer: Checks if hedging is needed.
         Trigger: Drawdown > 1.5 * ATR_Value_USD
         """
-        if bucket_id not in self.bucket_stats:
-            return False
+        with self._lock:
+            if bucket_id not in self.bucket_stats:
+                return False
+                
+            stats = self.bucket_stats[bucket_id]
             
-        stats = self.bucket_stats[bucket_id]
-        
-        # Only trigger if we are in SINGLE mode (don't hedge a hedge)
-        if stats.mode != BucketMode.SINGLE:
-            return False
+            # Only trigger if we are in SINGLE mode (don't hedge a hedge)
+            if stats.mode != BucketMode.SINGLE:
+                return False
+                
+            positions = [self.active_positions[t] for t in stats.positions if t in self.active_positions]
+            if not positions:
+                return False
+                
+            # Calculate Drawdown
+            drawdown = self.calculate_bucket_drawdown(bucket_id, market_data)
             
-        positions = [self.active_positions[t] for t in stats.positions if t in self.active_positions]
-        if not positions:
-            return False
-            
-        # Calculate Drawdown
-        drawdown = self.calculate_bucket_drawdown(bucket_id, market_data)
-        
-        # Calculate Threshold (4.0 * ATR in USD) - [TUNED FOR GOLD]
-        atr_value = market_data.get('atr', 0.0010)
-        total_volume = sum(p.volume for p in positions)
-        symbol = positions[0].symbol
+            # Calculate Threshold (4.0 * ATR in USD) - [TUNED FOR GOLD]
+            atr_value = market_data.get('atr', 0.0010)
+            total_volume = sum(p.volume for p in positions)
+            symbol = positions[0].symbol
         
         # Contract Size
         contract_size = 100 if "XAU" in symbol or "GOLD" in symbol else 100000
@@ -293,6 +297,90 @@ class PositionManager:
         
         if drawdown > threshold:
             logger.warning(f"[STABILIZER] Triggered! Drawdown ${drawdown:.2f} > Threshold ${threshold:.2f} (4.0x ATR)")
+            return True
+            
+        return False
+
+    async def execute_calculated_recovery(self, broker, bucket_id: str, market_data: Dict) -> bool:
+        """
+        HIGHEST INTELLIGENCE LAYER 2: CALCULATED RECOVERY (THE MUSCLE)
+        If a bucket is stuck > 30 mins, execute a recovery trade to break even + profit.
+        """
+        # 1. Gather Data under Lock
+        with self._lock:
+            if bucket_id not in self.bucket_stats:
+                return False
+                
+            stats = self.bucket_stats[bucket_id]
+            
+            # Check Duration (Stuck Trade?)
+            duration_mins = (time.time() - stats.open_time) / 60
+            if duration_mins < 15:
+                return False # Not stuck yet
+                
+            # Check if we already tried recovery recently (cooldown)
+            # [FIX] Use specific recovery timestamp, not generic update time
+            if time.time() - getattr(stats, 'last_recovery_time', 0.0) < 300: # 5 mins cooldown
+                return False
+
+            positions = [self.active_positions[t] for t in stats.positions if t in self.active_positions]
+            if not positions:
+                return False
+                
+            # Calculate Net Deficit
+            net_pnl = sum(p.profit for p in positions) + sum(p.swap for p in positions) + sum(p.commission for p in positions)
+            
+            if net_pnl >= 0:
+                return False # Not in loss
+                
+            deficit = abs(net_pnl)
+            
+            # Prepare execution data
+            symbol = positions[0].symbol
+            net_vol = sum(p.volume if p.type == 0 else -p.volume for p in positions)
+            
+        # 2. Calculate Recovery Volume (Outside Lock)
+        target_profit = 10.0 # Aim for small profit
+        total_needed = deficit + target_profit
+        
+        swing_price = 3.00 # Standard Gold Swing
+        contract_size = 100 # Gold
+        
+        recovery_volume = total_needed / (swing_price * contract_size)
+        recovery_volume = round(recovery_volume, 2)
+        
+        # Safety Caps
+        if recovery_volume > 0.5: recovery_volume = 0.5 # Hard cap for safety
+        if recovery_volume < 0.01: recovery_volume = 0.01
+        
+        # 3. Determine Direction (Hedge the Loss)
+        if net_vol > 0: # Net Long
+            action = "SELL"
+            price = market_data.get('bid')
+        else: # Net Short
+            action = "BUY"
+            price = market_data.get('ask')
+            
+        # 4. Execute Recovery Trade
+        logger.info(f"[MUSCLE] Executing Calculated Recovery for {bucket_id}. Deficit: ${deficit:.2f}. Vol: {recovery_volume} {action}")
+        
+        result = broker.execute_order(
+            action="OPEN",
+            symbol=symbol,
+            order_type=action,
+            price=price,
+            volume=recovery_volume,
+            sl=0.0,
+            tp=0.0,
+            comment="Calculated Recovery"
+        )
+        
+        if result:
+            with self._lock:
+                # Re-fetch stats to ensure we update the correct object
+                if bucket_id in self.bucket_stats:
+                    self.bucket_stats[bucket_id].last_update = time.time()
+                    self.bucket_stats[bucket_id].last_recovery_time = time.time()
             return True
             
         return False
@@ -662,26 +750,27 @@ class PositionManager:
 
     def _update_bucket_stats(self) -> None:
         """Update statistics for all active buckets."""
-        for bucket_id, stats in self.bucket_stats.items():
-            if stats.closed:
-                continue
+        with self._lock:
+            for bucket_id, stats in self.bucket_stats.items():
+                if stats.closed:
+                    continue
 
-            # Calculate current net profit
-            total_profit = 0.0
-            active_positions = 0
+                # Calculate current net profit
+                total_profit = 0.0
+                active_positions = 0
 
-            for ticket in stats.positions:
-                if ticket in self.active_positions:
-                    total_profit += self.active_positions[ticket].profit
-                    active_positions += 1
+                for ticket in stats.positions:
+                    if ticket in self.active_positions:
+                        total_profit += self.active_positions[ticket].profit
+                        active_positions += 1
 
-            stats.net_profit = total_profit
-            stats.last_update = time.time()
+                stats.net_profit = total_profit
+                stats.last_update = time.time()
 
-            # Mark bucket as closed if no positions remain
-            if active_positions == 0:
-                stats.closed = True
-                self.closed_buckets.add(bucket_id)
+                # Mark bucket as closed if no positions remain
+                if active_positions == 0:
+                    stats.closed = True
+                    self.closed_buckets.add(bucket_id)
 
     def get_positions_for_symbol(self, symbol: str) -> List[Position]:
         """Get all active positions for a specific symbol."""
@@ -824,7 +913,14 @@ class PositionManager:
             
         # 4. Execution Delay Buffer (The "Slippage Cushion")
         # We add $3.00 per lot to account for the 200ms-500ms closing delay
-        execution_buffer = total_volume * 3.0 
+        # [INTELLIGENCE UPGRADE] Dynamic Slippage Prediction
+        # If volatility is high, slippage is exponential, not linear.
+        if volatility_ratio > 1.5:
+             # High Volatility: $10.00 per lot buffer
+             execution_buffer = total_volume * 10.0
+        else:
+             # Normal: $3.00 per lot buffer
+             execution_buffer = total_volume * 3.0
         
         # Final Calculation
         total_target = base_profit + spread_cost + vol_penalty + execution_buffer
@@ -851,26 +947,28 @@ class PositionManager:
         - ATR-based profit/loss targets
         - Multi-agent AI consensus
         """
-        if bucket_id not in self.bucket_stats:
-            logger.info(f"[TP_CHECK_SKIP] Bucket {bucket_id} not in bucket_stats")
-            return False, 0.0
+        with self._lock:
+            if bucket_id not in self.bucket_stats:
+                logger.info(f"[TP_CHECK_SKIP] Bucket {bucket_id} not in bucket_stats")
+                return False, 0.0
 
-        stats = self.bucket_stats[bucket_id]
-        
-        # State validation - skip if in transitioning state
-        if stats.state == PositionState.TRANSITIONING:
-            logger.debug(f"[TP_CHECK_SKIP] Bucket {bucket_id} in TRANSITIONING state")
-            return False, 0.0
-        
-        if stats.state == PositionState.PENDING_CLOSE or stats.state == PositionState.CLOSED:
-            logger.debug(f"[TP_CHECK_SKIP] Bucket {bucket_id} in {stats.state.name} state")
-            return False, 0.0
-        
-        if stats.closed:
-            logger.info(f"[TP_CHECK_SKIP] Bucket {bucket_id} already closed")
-            return False, 0.0
+            stats = self.bucket_stats[bucket_id]
+            
+            # State validation - skip if in transitioning state
+            if stats.state == PositionState.TRANSITIONING:
+                logger.debug(f"[TP_CHECK_SKIP] Bucket {bucket_id} in TRANSITIONING state")
+                return False, 0.0
+            
+            if stats.state == PositionState.PENDING_CLOSE or stats.state == PositionState.CLOSED:
+                logger.debug(f"[TP_CHECK_SKIP] Bucket {bucket_id} in {stats.state.name} state")
+                return False, 0.0
+            
+            if stats.closed:
+                logger.info(f"[TP_CHECK_SKIP] Bucket {bucket_id} already closed")
+                return False, 0.0
 
-        positions = [self.active_positions[t] for t in stats.positions if t in self.active_positions]
+            positions = [self.active_positions[t] for t in stats.positions if t in self.active_positions]
+            
         if not positions:
             logger.info(f"[TP_CHECK_SKIP] Bucket {bucket_id} has no active active positions")
             return False, 0.0
@@ -1034,16 +1132,25 @@ class PositionManager:
                         target_profit_usd = final_tp_pips * usd_per_pip_per_lot * first_pos.volume
                         
                         # Check if actual profit exceeds target
-                        if first_pos.profit >= target_profit_usd:
-                            logger.info(f"[TP FALLBACK] BROKER PROFIT TARGET REACHED: ${first_pos.profit:.2f} >= ${target_profit_usd:.2f} (Target: {final_tp_pips:.1f} pips)")
+                        # [FIX] Use Net PnL (Profit + Swap + Comm) to avoid closing in loss
+                        net_pnl, _, _, _ = self.calculate_net_pnl(positions)
+                        
+                        if net_pnl >= target_profit_usd:
+                            logger.info(f"[TP FALLBACK] BROKER PROFIT TARGET REACHED: Net ${net_pnl:.2f} >= ${target_profit_usd:.2f} (Target: {final_tp_pips:.1f} pips)")
                             profit_exit = True
                     except Exception as e:
                         logger.error(f"Error in USD fallback check: {e}")
                 # =====================================
 
                 if profit_exit:
-                    tp_price = entry_price + (final_tp_pips / pip_multiplier) if first_pos.is_buy else entry_price - (final_tp_pips / pip_multiplier)
-                    logger.info(f"[TP HIT] PROFIT TARGET REACHED: {profit_pips:.1f} pips >= {final_tp_pips:.1f} pips target | TP Price: {tp_price:.{precision}f}")
+                    # [CRITICAL FIX] Double Check Net PnL before closing
+                    net_pnl, _, _, _ = self.calculate_net_pnl(positions)
+                    if net_pnl < 0:
+                        logger.warning(f"[TP ABORT] Profit Exit triggered but Net PnL is negative (${net_pnl:.2f}). Holding.")
+                        profit_exit = False
+                    else:
+                        tp_price = entry_price + (final_tp_pips / pip_multiplier) if first_pos.is_buy else entry_price - (final_tp_pips / pip_multiplier)
+                        logger.info(f"[TP HIT] PROFIT TARGET REACHED: {profit_pips:.1f} pips >= {final_tp_pips:.1f} pips target | TP Price: {tp_price:.{precision}f}")
             else:
                 # BUCKET: Use DYNAMIC BREAK-EVEN LOGIC
                 total_profit_usd = sum(pos.profit for pos in positions)
@@ -1086,6 +1193,10 @@ class PositionManager:
                 # [ENHANCEMENT] Use True Net PnL (Profit + Swap + Commission)
                 net_pnl, gross_pnl, swap, comm = self.calculate_net_pnl(positions)
                 
+                # [DEBUG] Detailed Exit Calculation Log
+                if len(positions) >= 2:
+                    logger.info(f"[EXIT CALC] {bucket_id} | Net PnL: ${net_pnl:.2f} | Target: ${target_profit_usd:.2f} | Trades: {num_trades} | VolRatio: {volatility_ratio:.2f}")
+
                 # [ENHANCEMENT] Stalemate Breaker Logic
                 # If stuck for too long, reduce target
                 current_time = int(time.time())
@@ -1129,7 +1240,11 @@ class PositionManager:
                 # Rule B: The "Breakeven Assist" (50% -> 10%)
                 # If we hit 50% of target but dropped to near zero, CLOSE at small profit.
                 elif current_high >= (effective_target * 0.5) and net_pnl <= (effective_target * 0.1):
-                    if net_pnl > 0.50: # Ensure positive
+                    # [INTELLIGENCE UPGRADE] Slippage Buffer for Ratchet
+                    # Don't close at $0.50 if volatility is high, slippage will kill it.
+                    min_profit_buffer = 2.0 if volatility_ratio > 1.5 else 0.50
+                    
+                    if net_pnl > min_profit_buffer: # Ensure positive with buffer
                         ratchet_exit = True
                         ratchet_reason = f"[BE DEFENSE] Peak ${current_high:.2f} -> Now ${net_pnl:.2f}"
                         status_msg += " [DEFENSE]"
@@ -1232,8 +1347,9 @@ class PositionManager:
                 if spread_cost_exit: exit_reasons.append("SPREAD")
 
                 # Store exit reason in bucket stats for TradingLogger summary
-                stats.exit_reason = ', '.join(exit_reasons)
-                stats.exit_confidence = final_confidence
+                with self._lock:
+                    stats.exit_reason = ', '.join(exit_reasons)
+                    stats.exit_confidence = final_confidence
                 
                 # Simple exit signal log - detailed summary will come when positions close
                 logger.info(f"[EXIT SIGNAL] {bucket_id} | Reasons: {stats.exit_reason} | Confidence: {final_confidence:.3f}")
@@ -1244,9 +1360,10 @@ class PositionManager:
             logger.error(f"Error evaluating bucket {bucket_id} exit: {e}")
             return False, 0.0
 
-    async def update_bucket_tp(self, symbol: str, bucket_id: str, current_price: float = None):
+    async def update_bucket_tp(self, broker, symbol: str, bucket_id: str, current_price: float = None):
         """
         Updates the TP for all positions in a bucket using Dynamic Profit Decay.
+        INTELLIGENCE UPGRADE: Validates TP against StopLevel and Direction to prevent 'Invalid stops'.
         """
         positions = self.get_positions_in_bucket(bucket_id)
         if not positions:
@@ -1254,69 +1371,274 @@ class PositionManager:
 
         # Get current market price
         if current_price is None:
-            # Fallback if not provided (should not happen with correct calling)
             return
             
         # Calculate the new "Survival" TP
-        new_tp = self.calculate_optimized_tp(positions, tick['bid'] if positions[0]['type'] == 0 else tick['ask'])
+        # Use dot notation for Position objects
+        first_pos = positions[0]
+        new_tp = self.calculate_optimized_tp(positions, current_price)
+        
+        # [FIX] Get Stop Level and Ask Price from MT5 for validation
+        stop_level_dist = 0.0
+        current_ask = current_price # Default fallback
+        try:
+            symbol_info = mt5.symbol_info(symbol)
+            if symbol_info:
+                stop_level_dist = symbol_info.trade_stops_level * symbol_info.point
+            
+            tick = mt5.symbol_info_tick(symbol)
+            if tick:
+                current_ask = tick.ask
+        except Exception:
+            pass
         
         # Apply to all trades in the bucket
         for pos in positions:
             # Only update if TP is different (save API calls)
-            # Assuming pos is an object with .tp attribute
             current_tp = getattr(pos, 'tp', 0.0)
             if abs(current_tp - new_tp) > 0.01:
-                # Use modify_position (assuming it exists in self.market or self.broker)
-                # If not, we need to find where it is. 
-                # Usually it's self.market.modify_position or self.broker.modify_position
-                # Let's assume self.market.modify_position based on other calls
+                
+                # [CRITICAL VALIDATION] Check if TP is valid for this specific trade direction
+                is_valid_tp = False
+                if pos.type == 0: # BUY
+                    # TP must be > Current Bid + StopLevel
+                    if new_tp > (current_price + stop_level_dist):
+                        is_valid_tp = True
+                else: # SELL
+                    # TP must be < Current Ask - StopLevel
+                    if new_tp < (current_ask - stop_level_dist):
+                        is_valid_tp = True
+                
+                # If invalid (e.g. hedging leg that is losing), set TP to 0.0 (Virtual Exit only)
+                target_tp = new_tp if is_valid_tp else 0.0
+                
+                # Skip if we are trying to set 0.0 and it's already 0.0
+                if target_tp == 0.0 and current_tp == 0.0:
+                    continue
+
                 try:
-                    await self.market.modify_position(pos.ticket, sl=pos.sl, tp=new_tp)
-                    logger.info(f"[SURVIVAL] Updated TP for Ticket {pos.ticket} to {new_tp}")
+                    # Use broker adapter to modify position
+                    # Convert integer type to string for execute_order
+                    order_type_str = "BUY" if pos.type == 0 else "SELL"
+                    broker.execute_order(
+                        symbol=pos.symbol, 
+                        action="MODIFY", 
+                        volume=pos.volume, 
+                        order_type=order_type_str, 
+                        sl=pos.sl, 
+                        tp=target_tp, 
+                        ticket=pos.ticket
+                    )
+                    if target_tp > 0:
+                        logger.info(f"[SURVIVAL] Updated TP for Ticket {pos.ticket} to {target_tp}")
+                    else:
+                        logger.debug(f"[SURVIVAL] Cleared TP for Ticket {pos.ticket} (Virtual Exit Only)")
+                        
                 except Exception as e:
                     logger.error(f"Failed to update TP for {pos.ticket}: {e}")
 
     def calculate_optimized_tp(self, positions, current_price):
         """
-        SURVIVAL MODE: Calculates a dynamic TP.
-        If bucket is heavy, target Break-Even to escape fast.
+        SURVIVAL MODE: Calculates a dynamic TP based on Net Equity Break-Even.
+        Correctly handles hedged positions (mixed Buy/Sell).
         """
         if not positions:
             return 0.0
 
-        total_vol = sum(p['volume'] for p in positions)
+        # Calculate Net Volume and Weighted Entry
+        net_vol = 0.0
+        sum_entry_cost = 0.0
+        
+        symbol = positions[0].symbol
+        
+        for p in positions:
+            # 0=BUY (Positive Vol), 1=SELL (Negative Vol)
+            sign = 1 if p.type == 0 else -1
+            net_vol += (p.volume * sign)
+            sum_entry_cost += (p.price_open * p.volume * sign)
+
+        # Determine slippage buffer based on symbol
+        slippage_buffer = 0.0
+        if "XAU" in symbol:
+            slippage_buffer = 0.50 # [TUNED] Increased to 50 cents for Gold (covers spread + slippage)
+        elif "JPY" in symbol:
+            slippage_buffer = 0.05 # 5 pips buffer for JPY
+        else:
+            slippage_buffer = 0.0005 # 5 pips for others
+
+        # [FIX] Get Stop Level and Ask Price from MT5
+        stop_level_dist = 0.0
+        current_ask = current_price # Default fallback
+        try:
+            symbol_info = mt5.symbol_info(symbol)
+            if symbol_info:
+                stop_level_dist = symbol_info.trade_stops_level * symbol_info.point
+            
+            tick = mt5.symbol_info_tick(symbol)
+            if tick:
+                current_ask = tick.ask
+        except Exception:
+            pass
+
+        # Target Profit (in Price units)
+        # We want Net PnL > Target
+        # PnL = (ExitPrice * NetVol) - SumEntryCost
+        # Target = (ExitPrice * NetVol) - SumEntryCost
+        # ExitPrice = (Target + SumEntryCost) / NetVol
+        
         count = len(positions)
+        total_raw_vol = sum(p.volume for p in positions)
         
-        # Calculate Weighted Average Price (Break-Even Point)
-        weighted_sum = sum(p['price'] * p['volume'] for p in positions)
-        avg_price = weighted_sum / total_vol
+        # Dynamic Profit Target (in currency units per lot approx)
+        # If we have 1 lot net, 0.40 price move = 0.40 profit (if contract=1)
+        # We'll stick to price distance logic
         
-        direction = positions[0]['type']
-
-        # --- LOGIC: DYNAMIC PROFIT DECAY ---
-        # Normal: Target ~40 pips profit
-        # Heavy (>3 trades): Target ~20 pips (Minimum profit to escape)
-        # Critical (>5 trades or >1.0 lot): Target ~5 pips (Just get out!)
-        
-        if count >= 5 or total_vol > 1.0:
-            target_pips = 0.05  # Survival (5 pips)
+        # [TUNED FOR GOLD] Increased target distances to ensure profitability
+        if count >= 5 or total_raw_vol > 1.0:
+            target_dist = 0.10 + slippage_buffer # Was 0.05
         elif count >= 3:
-            target_pips = 0.20  # Caution (20 pips) - [USER REQUESTED]
+            target_dist = 0.30 + slippage_buffer # Was 0.20
         else:
-            target_pips = 0.40  # Normal (40 pips)
+            target_dist = 0.60 + slippage_buffer # Was 0.40
 
-        if direction == 'buy':
-            # Ensure TP is above Avg Price
-            final_tp = avg_price + target_pips
-            # Sanity check: If current price is already above avg, ensure TP is above current
-            if current_price > avg_price:
-                final_tp = max(final_tp, current_price + 0.05)
-        else:
-            final_tp = avg_price - target_pips
-            if current_price < avg_price:
-                final_tp = min(final_tp, current_price - 0.05)
+        # If perfectly hedged, we can't set a TP based on price movement
+        if abs(net_vol) < 0.001:
+            return 0.0
+
+        # Calculate Break-Even Price
+        # BE_Price = SumEntryCost / NetVol
+        be_price = sum_entry_cost / net_vol
+        
+        # Add Profit Target
+        # If Net Long (NetVol > 0), we want Price > BE
+        # If Net Short (NetVol < 0), we want Price < BE
+        
+        if net_vol > 0: # Net Long (Exit at Bid)
+            final_tp = be_price + target_dist
+            
+            # Validation: TP must be > Current Bid + StopLevel
+            min_tp = current_price + stop_level_dist
+            if final_tp < min_tp:
+                 final_tp = min_tp
+                 
+        else: # Net Short (Exit at Ask)
+            final_tp = be_price - target_dist
+            
+            # Validation: TP must be < Current Ask - StopLevel
+            max_tp = current_ask - stop_level_dist
+            if final_tp > max_tp:
+                final_tp = max_tp
 
         return round(final_tp, 2)
+
+    async def execute_ai_sniper_logic(self, bucket_id: str, oracle, broker, market_data: Dict) -> bool:
+        """
+        Executes the 'AI Sniper' Smart Unwind logic.
+        1. Checks for Sniper Signal (Trend Reversal).
+        2. Banks profit from Winners (Hedges).
+        3. Uses profit to close Losers (De-leveraging).
+        """
+        with self._lock:
+            if bucket_id not in self.bucket_stats:
+                return False
+            
+        positions = self.get_positions_in_bucket(bucket_id)
+        if len(positions) < 2:
+            return False # Need at least 2 positions to unwind
+            
+        # Get Signal
+        prices = market_data.get('prices', [])
+        volumes = market_data.get('volumes', [])
+        
+        # Ensure we have enough data
+        if not prices or len(prices) < 30:
+            return False
+
+        signal = oracle.get_sniper_signal(prices, volumes)
+        
+        if not signal:
+            return False
+            
+        logger.info(f"[SNIPER] Signal Detected: {signal} for Bucket {bucket_id}")
+        
+        # Identify Winners and Losers based on Signal
+        # SELL_SNIPER (Top) -> Buys are Winners (we want to close them before drop), Sells are Losers
+        # BUY_SNIPER (Bottom) -> Sells are Winners (we want to close them before rise), Buys are Losers
+        
+        winners = []
+        losers = []
+        
+        if signal == "SELL_SNIPER":
+            winners = [p for p in positions if p.type == 0] # Buys
+            losers = [p for p in positions if p.type == 1]  # Sells
+        elif signal == "BUY_SNIPER":
+            winners = [p for p in positions if p.type == 1] # Sells
+            losers = [p for p in positions if p.type == 0]  # Buys
+            
+        if not winners:
+            return False
+            
+        # Calculate Bankable Profit
+        total_winner_profit = sum(p.profit for p in winners)
+        if total_winner_profit <= 0:
+            return False # Winners aren't winning yet
+            
+        # --- AI PLAN LOG ---
+        plan_msg = (
+            f"\n>>> [AI SNIPER PLAN] EXECUTING SMART UNWIND <<<\n"
+            f"Signal:       {signal} (Trend Exhaustion)\n"
+            f"Action:       Bank Winners -> Kill Losers\n"
+            f"Bank Amount:  ${total_winner_profit:.2f} (From {len(winners)} Hedges)\n"
+            f"Target:       Reduce Exposure on {len(losers)} Losing Trades\n"
+            f"Objective:    Escape Hedging Trap with Net Profit\n"
+            f"----------------------------------------------------"
+        )
+        import sys
+        if sys.platform == 'win32':
+            ui_logger.info(plan_msg)
+        else:
+            try:
+                ui_logger.info(plan_msg)
+            except Exception:
+                ui_logger.info(plan_msg)
+        # -------------------
+        
+        logger.info(f"[SNIPER] Executing Smart Unwind! Bank: ${total_winner_profit:.2f}")
+        
+        # 1. Close Winners
+        await broker.close_positions(winners)
+        
+        # 2. Close Losers (Partial or Full)
+        # Sort losers by worst price (furthest from current)
+        # For Sells: Lowest price is worst (if price is high)
+        # For Buys: Highest price is worst (if price is low)
+        
+        if signal == "SELL_SNIPER":
+            # We are at Top. Sells at bottom are worst.
+            losers.sort(key=lambda p: p.price_open) 
+        else:
+            # We are at Bottom. Buys at top are worst.
+            losers.sort(key=lambda p: p.price_open, reverse=True)
+            
+        budget = total_winner_profit * 0.90 # Keep 10% as pure profit
+        closed_losers = []
+        
+        for loser in losers:
+            # Check if we can afford to close this loser
+            loss = abs(loser.profit)
+            if loss < budget:
+                closed_losers.append(loser)
+                budget -= loss
+            else:
+                # Partial close? Not implemented yet.
+                # Just stop here.
+                break
+                
+        if closed_losers:
+            await broker.close_positions(closed_losers)
+            logger.info(f"[SNIPER] Unwound {len(closed_losers)} losers using bank. Remaining Budget: ${budget:.2f}")
+            
+        return True
 
     async def close_bucket_positions(self, broker, bucket_id: str, symbol: str) -> bool:
         """
@@ -1330,20 +1652,22 @@ class PositionManager:
         Returns:
             True if all positions closed successfully
         """
-        if bucket_id not in self.bucket_stats:
-            return False
+        with self._lock:
+            if bucket_id not in self.bucket_stats:
+                return False
 
-        stats = self.bucket_stats[bucket_id]
-        
-        # Set state to PENDING_CLOSE to prevent concurrent operations
-        self._set_position_state(bucket_id, PositionState.PENDING_CLOSE)
-        
-        positions = [self.active_positions[t] for t in stats.positions if t in self.active_positions]
+            stats = self.bucket_stats[bucket_id]
+            
+            # Set state to PENDING_CLOSE to prevent concurrent operations
+            self._set_position_state(bucket_id, PositionState.PENDING_CLOSE)
+            
+            positions = [self.active_positions[t] for t in stats.positions if t in self.active_positions]
 
         if not positions:
             logger.warning(f"Bucket {bucket_id} has no active positions to close")
             # Mark as fully closed
-            self._set_position_state(bucket_id, PositionState.CLOSED)
+            with self._lock:
+                self._set_position_state(bucket_id, PositionState.CLOSED)
             return True
 
         # [OPTIMIZATION] FIRE FIRST, LOG LATER
@@ -1443,32 +1767,30 @@ class PositionManager:
 
         exit_reason = stats.exit_reason if stats.exit_reason else "PROFIT"
         
-        # Enhanced Summary
+        # Enhanced Summary with AI Plan
         msg = (
-            f"\n================= EXIT SUMMARY =================\n"
+            f"\n>>> [AI EXIT PLAN] CLOSING BUCKET <<<\n"
             f"Symbol:          {symbol}\n"
-            f"Exit Reason:     {exit_reason}\n"
+            f"Reason:          {exit_reason}\n"
+            f"Plan:            Close {len(positions)} positions to secure ${total_pnl:.2f}\n"
             f"Duration:        {duration_str}\n"
             f"Total PnL:       ${total_pnl:.2f} ({total_pips:+.1f} pips)\n"
-            f"Positions Closed: {successful_closes}/{len(positions)}\n"
             f"Volume:          {total_volume:.2f} lots\n"
-            f"Explanation:     Closed {successful_closes} position(s) after {bucket_duration/60:.1f} minutes.\n"
-            f"                 Target '{exit_reason}' achieved.\n"
-            f"===================================================="
+            f"Status:          EXECUTING NOW...\n"
+            f"----------------------------------------------------"
         )
         
         # [FIX] Windows Console Compatibility - Force clean version on Windows
         clean_msg = (
-            f"\n=== EXIT SUMMARY ===\n"
+            f"\n>>> [AI EXIT PLAN] CLOSING BUCKET <<<\n"
             f"Symbol:          {symbol}\n"
-            f"Exit Reason:     {exit_reason}\n"
+            f"Reason:          {exit_reason}\n"
+            f"Plan:            Close {len(positions)} positions to secure ${total_pnl:.2f}\n"
             f"Duration:        {duration_str}\n"
             f"Total PnL:       ${total_pnl:.2f} ({total_pips:+.1f} pips)\n"
-            f"Positions Closed: {successful_closes}/{len(positions)}\n"
             f"Volume:          {total_volume:.2f} lots\n"
-            f"Explanation:     Closed {successful_closes} position(s) after {bucket_duration/60:.1f} minutes.\n"
-            f"                 Target '{exit_reason}' achieved.\n"
-            f"===================================================="
+            f"Status:          EXECUTING NOW...\n"
+            f"----------------------------------------------------"
         )
         
         import sys
@@ -1540,14 +1862,15 @@ class PositionManager:
         Returns:
             True if bucket was closed recently
         """
-        if bucket_id not in self.closed_buckets:
-            return False
+        with self._lock:
+            if bucket_id not in self.closed_buckets:
+                return False
 
-        # Find the close time
-        for stats in self.bucket_stats.values():
-            if stats.bucket_id == bucket_id and stats.closed:
-                time_since_close = time.time() - stats.last_update
-                return time_since_close < cooldown_seconds
+            # Find the close time
+            for stats in self.bucket_stats.values():
+                if stats.bucket_id == bucket_id and stats.closed:
+                    time_since_close = time.time() - stats.last_update
+                    return time_since_close < cooldown_seconds
 
         return False
 
@@ -1576,16 +1899,19 @@ class PositionManager:
     def get_pending_close_symbols(self) -> List[str]:
         """Get symbols that have pending close operations."""
         current_time = time.time()
-        return [symbol for symbol, timestamp in self.pending_closes.items()
-                if current_time - timestamp < 5.0]  # 5 second timeout
+        with self._lock:
+            return [symbol for symbol, timestamp in self.pending_closes.items()
+                    if current_time - timestamp < 5.0]  # 5 second timeout
 
     def set_pending_close(self, symbol: str) -> None:
         """Mark a symbol as having pending close operations."""
-        self.pending_closes[symbol] = time.time()
+        with self._lock:
+            self.pending_closes[symbol] = time.time()
 
     def clear_pending_close(self, symbol: str) -> None:
         """Clear pending close flag for a symbol."""
-        self.pending_closes.pop(symbol, None)
+        with self._lock:
+            self.pending_closes.pop(symbol, None)
 
     def get_positions_in_bucket(self, bucket_id: str) -> List[Position]:
         """

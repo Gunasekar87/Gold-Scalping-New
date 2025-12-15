@@ -17,8 +17,8 @@ class IronShield:
             # Fallback defaults
             self.atr_zone_multiplier = 0.8
             self.atr_tp_multiplier = 0.8
-            self.min_zone_floor = 30
-            self.min_tp_floor = 30
+            self.min_zone_floor = 50 # Updated to 5 pips for Gold
+            self.min_tp_floor = 50   # Updated to 5 pips for Gold
 
         # Elastic Defense Protocol Parameters
         self.min_distance_atr_multiplier = 0.5

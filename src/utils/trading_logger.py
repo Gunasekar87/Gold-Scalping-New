@@ -55,6 +55,7 @@ class TradingLogger:
         msg.append(f"AI Analysis: {data['reasoning']}")
         
         logger.info("\n".join(msg))
+        print("\n".join(msg), flush=True)
 
     @staticmethod
     def log_active_status(symbol: str, bucket_id: str, positions: List[Dict], pnl_pips: float, tp_pips: float, next_hedge: Optional[Dict] = None, ai_notes: str = ""):
@@ -108,6 +109,7 @@ class TradingLogger:
         msg.append(f"Explanation: {explanation}")
         
         logger.info("\n".join(msg))
+        print("\n".join(msg), flush=True)
     
     @staticmethod
     def log_decision_change(symbol: str, old_decision: Dict, new_decision: Dict, reason: str):

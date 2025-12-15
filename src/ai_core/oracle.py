@@ -44,6 +44,149 @@ class Oracle:
             logger.error(f"[ORACLE] Failed to load model: {e}")
             self.model = None
 
+    def calculate_rsi(self, prices, period=14):
+        """Helper to calculate RSI for the Sniper logic."""
+        if len(prices) < period + 1:
+            return []
+        prices_arr = np.array(prices)
+        deltas = np.diff(prices_arr)
+        seed = deltas[:period+1]
+        up = seed[seed >= 0].sum() / period
+        down = -seed[seed < 0].sum() / period
+        rs = up / down if down != 0 else 0
+        rsi = np.zeros_like(prices_arr)
+        rsi[:period] = 100. - 100. / (1. + rs)
+
+        for i in range(period, len(prices_arr)):
+            delta = deltas[i - 1]
+            if delta > 0:
+                upval = delta
+                downval = 0.
+            else:
+                upval = 0.
+                downval = -delta
+            
+            up = (up * (period - 1) + upval) / period
+            down = (down * (period - 1) + downval) / period
+            rs = up / down if down != 0 else 0
+            rsi[i] = 100. - 100. / (1. + rs)
+        return rsi
+
+    def get_sniper_signal(self, prices: list, volumes: list) -> str:
+        """
+        The 'World Class' Sniper Logic.
+        Returns: 'SELL_SNIPER', 'BUY_SNIPER', or None.
+        Checks:
+        1. Momentum Exhaustion (Linear Regression)
+        2. RSI Extreme
+        3. Volume Divergence (Price Up, Volume Down)
+        """
+        if len(prices) < 30 or len(volumes) < 30:
+            return None
+
+        # Calculate RSI internally
+        rsi_values = self.calculate_rsi(prices)
+        if len(rsi_values) < 1:
+            return None
+
+        current_price = prices[-1]
+        current_rsi = rsi_values[-1]
+        
+        # 1. Linear Regression Slope (Momentum)
+        # We look at the last 10 candles to see if the trend is flattening
+        y = np.array(prices[-10:])
+        x = np.arange(len(y))
+        A = np.vstack([x, np.ones(len(x))]).T
+        m, c = np.linalg.lstsq(A, y, rcond=None)[0]
+        slope = (m / current_price) * 10000 # Basis points
+
+        # 2. Volume Divergence Check
+        # Logic: Price is high, but Volume is dropping = Exhaustion
+        recent_vol_avg = np.mean(volumes[-3:])
+        past_vol_avg = np.mean(volumes[-15:-5])
+        vol_dropping = recent_vol_avg < (past_vol_avg * 0.85) # 15% drop in volume
+
+        # --- SNIPER LOGIC FOR SELL (Top of Bull Run) ---
+        # A. Extreme RSI (>75) - Overbought
+        # B. Slope is flattening (< 2.0) - Rocket running out of fuel
+        # C. Volume is drying up - Buyers leaving
+        if current_rsi > 75 and slope < 2.0 and vol_dropping:
+            return "SELL_SNIPER"
+
+        # --- SNIPER LOGIC FOR BUY (Bottom of Crash) ---
+        if current_rsi < 25 and slope > -2.0 and vol_dropping:
+            return "BUY_SNIPER"
+
+        return None
+
+    def get_regime_and_signal(self, candles):
+        """
+        HIGHEST INTELLIGENCE LAYER 1: REGIME DETECTION
+        Determines if market is TRENDING or RANGING to prevent death spirals.
+        """
+        if len(candles) < 20:
+            return "RANGE", "HOLD"
+
+        closes = np.array([c['close'] for c in candles])
+        
+        # 1. Calculate Linear Regression Slope (Trend Strength)
+        y = closes[-20:]
+        x = np.arange(len(y))
+        A = np.vstack([x, np.ones(len(x))]).T
+        m, c = np.linalg.lstsq(A, y, rcond=None)[0]
+        
+        # Normalize slope to basis points relative to price
+        current_price = closes[-1]
+        slope_bps = (m / current_price) * 10000 
+
+        # 2. Calculate RSI (Overbought/Oversold)
+        deltas = np.diff(closes)
+        gains = np.where(deltas > 0, deltas, 0)
+        losses = np.where(deltas < 0, -deltas, 0)
+        
+        # Simple Average for RSI (matches standard trading view approx)
+        avg_gain = np.mean(gains[-14:])
+        avg_loss = np.mean(losses[-14:])
+        
+        if avg_loss == 0:
+            rsi = 100
+        else:
+            rs = avg_gain / avg_loss
+            rsi = 100 - (100 / (1 + rs))
+
+        # 3. Determine Regime
+        regime = "RANGE"
+        if slope_bps > 2.5: # Strong Up Trend
+            regime = "TREND_UP"
+        elif slope_bps < -2.5: # Strong Down Trend
+            regime = "TREND_DOWN"
+        
+        # 4. Generate Signal based on Regime
+        signal = "HOLD"
+        
+        if regime == "TREND_UP":
+            # ONLY BUY in Uptrend, but wait for pullback (RSI not overbought)
+            if rsi < 70: 
+                signal = "BUY"
+            else:
+                signal = "HOLD" # Don't buy top
+                
+        elif regime == "TREND_DOWN":
+            # ONLY SELL in Downtrend, but wait for pullback (RSI not oversold)
+            if rsi > 30:
+                signal = "SELL"
+            else:
+                signal = "HOLD" # Don't sell bottom
+                
+        else: # RANGE
+            # Buy Low, Sell High
+            if rsi < 30:
+                signal = "BUY"
+            elif rsi > 70:
+                signal = "SELL"
+                
+        return regime, signal
+
     def predict(self, candles):
         """
         Predicts the next price movement direction.
