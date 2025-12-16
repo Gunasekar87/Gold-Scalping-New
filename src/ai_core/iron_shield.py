@@ -310,10 +310,12 @@ class IronShield:
         hedge_lot = numerator / denominator
         
         # SAFETY: Cap the Hedge Lot
-        # Max multiplier of 4x (Normal) or 5x (if Oracle confirms strong trend)
-        max_mult = 4.0
+        # [INTELLIGENT FIX] Reduced Max Multiplier to prevent "Death Spiral"
+        # Was 4.0/5.0, now capped at 2.0x (Normal) or 2.5x (Survival).
+        # This forces the bot to recover slowly rather than risking account blow-up.
+        max_mult = 2.0
         if hedge_level >= 3:
-            max_mult = 5.0 # Allow slightly more room in survival mode to ensure recovery
+            max_mult = 2.5 
             
         max_hedge = current_loss_lot * max_mult
         if hedge_lot > max_hedge:

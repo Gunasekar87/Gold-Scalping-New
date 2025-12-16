@@ -1443,6 +1443,18 @@ class PositionManager:
                 spread_cost_exit
             )
 
+            # [INTELLIGENT FIX] NO-LOSS PROTECTION
+            # Unless it's a critical Stop Loss or Emergency, NEVER close a bucket in negative.
+            # This prevents "Time Exit" or "AI Exit" from realizing a loss unnecessarily.
+            if should_close and not (stop_loss_exit or emergency_exit):
+                if total_pnl < 0:
+                    # Allow small loss if it's just spread/swap (e.g. > -$1.00)
+                    # But block significant losses
+                    if total_pnl < -1.0:
+                        logger.info(f"[VETO] Blocked Exit for {bucket_id}: Negative PnL (${total_pnl:.2f}). Waiting for recovery.")
+                        should_close = False
+                        final_confidence = 0.0
+
             # Calculate final confidence score (weighted average)
             exit_factors = [
                 (time_exit, 0.8),      # Time most important for scalping

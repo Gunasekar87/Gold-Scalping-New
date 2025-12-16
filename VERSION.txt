@@ -1,4 +1,10 @@
-﻿v5.2.1 (VIRTUAL EXIT & SAFETY NET) - 2025-12-15
+﻿v5.2.2 (INTELLIGENT GRID & ANTI-DEATH SPIRAL) - 2025-12-16
+- [CRITICAL] Dynamic Grid Spacing: Implemented ATR-based minimum distance to prevent "Micro-Zone Churn" (e.g., hedging in $0.40 range).
+- [CRITICAL] Anti-Death Spiral Cap: Hard-capped recovery multipliers to 2.0x (Normal) and 2.5x (Survival) to prevent exponential lot sizing.
+- [SAFETY] No-Loss Veto: Blocked "Time Exit" and "AI Exit" from closing buckets in negative PnL (unless Emergency).
+- [FIX] IronShield Logic: Updated `calculate_defense` to use safer multipliers and enforce "Velvet Cushion" logic.
+
+v5.2.1 (VIRTUAL EXIT & SAFETY NET) - 2025-12-15
 - [CRITICAL] Virtual Exit Only: Disabled broker-side Take Profit (TP) placement to prevent conflicts.
 - [FIX] NewsFilter Crash: Fixed method name mismatch (`can_trade` -> `should_trade`).
 - [NEW] Doomsday Protocol: Added global equity hard stop (20% drawdown).

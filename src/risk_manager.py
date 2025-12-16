@@ -160,9 +160,10 @@ class RiskManager:
         return self._hedge_states[symbol]
 
     def validate_hedge_conditions(self, broker, symbol: str, positions: List[Dict],
-                                tick: Dict, point: float) -> Tuple[bool, str]:
+                                tick: Dict, point: float, atr_val: float = 0.0) -> Tuple[bool, str]:
         """
         Validate if hedging conditions are met and safe.
+        [INTELLIGENT FIX] Enforces Dynamic Minimum Distance based on ATR.
 
         Args:
             broker: Broker adapter instance
@@ -170,6 +171,7 @@ class RiskManager:
             positions: List of position dictionaries
             tick: Current tick data
             point: Point value for symbol
+            atr_val: Current ATR value (volatility)
 
         Returns:
             Tuple of (can_hedge, reason)
@@ -206,6 +208,42 @@ class RiskManager:
             if age_since_last < self.config.min_age_seconds:
                 logger.info(f"[HEDGE_CHECK] Position too young ({age_since_last:.1f}s < {self.config.min_age_seconds}s)")
                 return False, f"Position too young ({age_since_last:.1f}s < {self.config.min_age_seconds}s)"
+
+            # [INTELLIGENT FIX] Safety Check 3.5: Minimum Distance (Dynamic ATR)
+            # Prevents "Micro-Zone Death Spiral" by ensuring we don't hedge in noise.
+            last_price = float(last_pos['price'])
+            current_price = tick['bid'] if last_pos['type'] == 0 else tick['ask'] # If last was BUY, we check Bid (current sell price)
+            # Actually, we just want distance.
+            # If last was BUY, we are looking to SELL (Hedge). Sell happens at Bid.
+            # If last was SELL, we are looking to BUY (Hedge). Buy happens at Ask.
+            # But here we just check raw distance to ensure we aren't churning.
+            
+            # Use the price relevant to the potential hedge? 
+            # No, just check distance from last entry.
+            dist = abs(current_price - last_price)
+            
+            # Calculate Dynamic Minimum Distance
+            # Rule: Min Distance = 25% of Daily ATR.
+            # e.g. ATR=20.0 -> Min Dist = 5.0.
+            # Floor: Never less than $2.00 (200 points) for Gold.
+            
+            pip_multiplier = 100 if "XAU" in symbol or "GOLD" in symbol else 10000
+            atr_pips = atr_val * pip_multiplier
+            
+            # Convert ATR to Price Units
+            atr_price = atr_val 
+            if atr_price <= 0: atr_price = 2.0 # Default fallback
+            
+            dynamic_min_dist = atr_price * 0.25
+            
+            # Hard Floor: $2.00 for Gold, 20 pips for Forex
+            min_floor = 2.0 if "XAU" in symbol or "GOLD" in symbol else 0.0020
+            
+            final_min_dist = max(min_floor, dynamic_min_dist)
+            
+            if dist < final_min_dist:
+                 # logger.debug(f"[HEDGE_CHECK] Distance too small ({dist:.2f} < {final_min_dist:.2f}). ATR: {atr_price:.2f}")
+                 return False, f"Distance too small ({dist:.2f} < {final_min_dist:.2f})"
 
             # Safety Check 4: Hedge cooldown
             time_since_hedge = time.time() - state.last_hedge_time
@@ -295,7 +333,7 @@ class RiskManager:
             return False
         
         # Validate conditions
-        can_hedge, reason = self.validate_hedge_conditions(broker, symbol, positions, tick, point)
+        can_hedge, reason = self.validate_hedge_conditions(broker, symbol, positions, tick, point, atr_val=atr_val)
         if not can_hedge:
             # Throttle cooldown logs
             if "cooldown" in reason.lower():
