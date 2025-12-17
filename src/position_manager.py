@@ -1447,11 +1447,12 @@ class PositionManager:
             # Unless it's a critical Stop Loss or Emergency, NEVER close a bucket in negative.
             # This prevents "Time Exit" or "AI Exit" from realizing a loss unnecessarily.
             if should_close and not (stop_loss_exit or emergency_exit):
-                if total_pnl < 0:
+                # Use net_pnl which is calculated earlier in the function
+                if net_pnl < 0:
                     # Allow small loss if it's just spread/swap (e.g. > -$1.00)
                     # But block significant losses
-                    if total_pnl < -1.0:
-                        logger.info(f"[VETO] Blocked Exit for {bucket_id}: Negative PnL (${total_pnl:.2f}). Waiting for recovery.")
+                    if net_pnl < -1.0:
+                        logger.info(f"[VETO] Blocked Exit for {bucket_id}: Negative PnL (${net_pnl:.2f}). Waiting for recovery.")
                         should_close = False
                         final_confidence = 0.0
 
@@ -1632,6 +1633,56 @@ class PositionManager:
             logger.info(f"[SNIPER] Unwound {len(closed_losers)} losers using bank. Remaining Budget: ${budget:.2f}")
             
         return True
+
+    async def execute_eraser_logic(self, bucket_id: str, broker) -> bool:
+        """
+        Executes 'The Eraser' (Tactical De-Risking).
+        1. Identifies 'God Mode' trade (Layer 5+).
+        2. Checks if it has enough profit to cover the worst losing trade.
+        3. Closes both to reduce exposure (De-Leveraging).
+        """
+        with self._lock:
+            if bucket_id not in self.bucket_stats:
+                return False
+            
+        positions = self.get_positions_in_bucket(bucket_id)
+        if len(positions) < 2:
+            return False 
+
+        # Sort by time (oldest first)
+        positions.sort(key=lambda p: p.time)
+        
+        # Identify God Mode Trade (Last one, if we have a stack)
+        # We assume the last trade is the largest/most recent hedge
+        god_mode_trade = positions[-1]
+        
+        # Check if it's actually profitable
+        if god_mode_trade.profit <= 0:
+            return False
+            
+        # Find the worst loser (usually the first one, or the one with most negative profit)
+        worst_loser = min(positions[:-1], key=lambda p: p.profit)
+        
+        if worst_loser.profit >= 0:
+            return False # No losers to erase
+            
+        # Buffer: Ensure we cover spread/commissions + small profit
+        # $10 buffer or 10% of profit
+        buffer = 10.0 
+        
+        if god_mode_trade.profit > (abs(worst_loser.profit) + buffer):
+            logger.info(f"[ERASER] Opportunity Detected! God Mode Profit: ${god_mode_trade.profit:.2f} covers Loser: ${worst_loser.profit:.2f}")
+            
+            # Execute The Eraser
+            # Close God Mode first to secure profit
+            await broker.close_position(god_mode_trade.ticket)
+            # Close Loser
+            await broker.close_position(worst_loser.ticket)
+            
+            logger.info(f"[ERASER] TACTICAL DE-RISKING COMPLETE. Reduced stack size.")
+            return True
+            
+        return False
 
     async def close_bucket_positions(self, broker, bucket_id: str, symbol: str) -> bool:
         """

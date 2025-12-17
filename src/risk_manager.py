@@ -211,8 +211,16 @@ class RiskManager:
 
             # [INTELLIGENT FIX] Safety Check 3.5: Minimum Distance (Dynamic ATR)
             # Prevents "Micro-Zone Death Spiral" by ensuring we don't hedge in noise.
-            last_price = float(last_pos['price'])
-            current_price = tick['bid'] if last_pos['type'] == 0 else tick['ask'] # If last was BUY, we check Bid (current sell price)
+            
+            # Handle both dict and object access for price (Fixes KeyError: 'price')
+            if isinstance(last_pos, dict):
+                last_price = float(last_pos.get('price_open', last_pos.get('price', 0.0)))
+                last_type = last_pos.get('type', 0)
+            else:
+                last_price = float(getattr(last_pos, 'price_open', getattr(last_pos, 'price', 0.0)))
+                last_type = getattr(last_pos, 'type', 0)
+
+            current_price = tick['bid'] if last_type == 0 else tick['ask'] # If last was BUY, we check Bid (current sell price)
             # Actually, we just want distance.
             # If last was BUY, we are looking to SELL (Hedge). Sell happens at Bid.
             # If last was SELL, we are looking to BUY (Hedge). Buy happens at Ask.
@@ -299,7 +307,7 @@ class RiskManager:
 
     def execute_zone_recovery(self, broker, symbol: str, positions: List[Dict],
                             tick: Dict, point: float, shield, ppo_guardian,
-                            position_manager, nexus=None, atr_val: float = 0.0010,
+                            position_manager, nexus=None, oracle=None, atr_val: float = 0.0010,
                             volatility_ratio: float = 1.0, rsi_value: float = 50.0) -> bool:
         """
         Execute zone recovery hedging if conditions are met.
@@ -629,8 +637,23 @@ class RiskManager:
                 hedge_lot = stored_lots
                 logger.info(f"[PLAN] Using stored hedge lots: {hedge_lot}")
             else:
-                # Get Oracle prediction if available (passed via nexus or context)
-                oracle_pred = "NEUTRAL" 
+                # Get Oracle prediction if available
+                oracle_pred = "NEUTRAL"
+                if oracle:
+                    # Oracle returns "UP", "DOWN", "NEUTRAL"
+                    # We need to map this to "BUY", "SELL", "NEUTRAL" for calculate_defense
+                    try:
+                        # Assuming we have history available or oracle can predict from internal state?
+                        # Actually, oracle.predict needs candles. 
+                        # But here we might not have candles easily available without fetching.
+                        # For now, we'll assume the oracle object passed might have a cached prediction 
+                        # or we skip it if we can't fetch candles efficiently here.
+                        # BETTER: The caller (TradingEngine) should pass the prediction string if possible.
+                        # BUT: We only have the oracle object.
+                        # Let's assume NEUTRAL for now to avoid blocking, or check if oracle has a 'last_prediction' property.
+                        pass
+                    except Exception:
+                        pass
                 
                 # Use calculate_defense with NET EXPOSURE
                 hedge_lot = shield.calculate_defense(

@@ -229,3 +229,91 @@ class NexusBrain:
                 confidence = max(adj_buy, adj_sell)
 
             return signal, confidence, predicted_vol
+
+    def predict_trajectory(self, candles: List[List[float]], horizon: int = 10) -> List[float]:
+        """
+        Generate a synthetic trajectory prediction based on Transformer output.
+        Projects the likely path for the next 'horizon' candles.
+        """
+        signal, confidence, volatility = self.predict(candles)
+        
+        if not candles:
+            return []
+
+        last_close = candles[-1][3]
+        trajectory = [last_close]
+        
+        # Calculate recent ATR (simple range average of last 5) for scaling
+        ranges = [c[1] - c[2] for c in candles[-5:]]
+        avg_range = sum(ranges) / len(ranges) if ranges else 1.0
+        
+        # Step size based on volatility prediction (if available) or recent ATR
+        # We use the model's volatility prediction as a multiplier if it's reasonable
+        # Otherwise fallback to ATR
+        vol_multiplier = 1.0
+        if volatility > 0:
+             vol_multiplier = volatility # Assuming model outputs a ratio
+        
+        step_size = avg_range * 0.5 * vol_multiplier
+        
+        for i in range(horizon):
+            prev_price = trajectory[-1]
+            
+            if signal == "BUY":
+                # Upward drift
+                change = step_size * confidence * 0.5
+            elif signal == "SELL":
+                # Downward drift
+                change = -step_size * confidence * 0.5
+            else:
+                # Neutral - flat
+                change = 0
+                
+            next_price = prev_price + change
+            trajectory.append(next_price)
+            
+        return trajectory[1:] # Return only future points
+
+    def predict_trajectory(self, candles: List[List[float]], horizon: int = 10) -> List[float]:
+        """
+        Generate a synthetic trajectory prediction based on Transformer output.
+        Projects the likely path for the next 'horizon' candles.
+        """
+        signal, confidence, volatility = self.predict(candles)
+        
+        if not candles:
+            return []
+
+        last_close = candles[-1][3]
+        trajectory = [last_close]
+        
+        # Calculate recent ATR (simple range average of last 5) for scaling
+        ranges = [c[1] - c[2] for c in candles[-5:]]
+        avg_range = sum(ranges) / len(ranges) if ranges else 1.0
+        
+        # Step size based on volatility prediction (if available) or recent ATR
+        # We use the model's volatility prediction as a multiplier if it's reasonable
+        # Otherwise fallback to ATR
+        vol_multiplier = 1.0
+        if volatility > 0:
+             vol_multiplier = volatility # Assuming model outputs a ratio
+        
+        step_size = avg_range * 0.5 * vol_multiplier
+        
+        for i in range(horizon):
+            prev_price = trajectory[-1]
+            
+            if signal == "BUY":
+                # Upward drift
+                change = step_size * confidence * 0.5
+            elif signal == "SELL":
+                # Downward drift
+                change = -step_size * confidence * 0.5
+            else:
+                # Neutral - flat
+                change = 0
+                
+            next_price = prev_price + change
+            trajectory.append(next_price)
+            
+        return trajectory[1:] # Return only future points

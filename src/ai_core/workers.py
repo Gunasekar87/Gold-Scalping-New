@@ -29,23 +29,47 @@ class RangeWorker(BaseWorker):
     """
     def get_signal(self, market_data: Dict[str, Any]) -> Tuple[str, float, str]:
         rsi = market_data.get('rsi', 50.0)
+        pressure = market_data.get('pressure_metrics', {})
         
-        # Aggressive Scalping: Trade the immediate deviation
-        # If RSI < 50, we are in the lower half -> BUY
-        # If RSI > 50, we are in the upper half -> SELL
-        # Removed deadband to ensure continuous trading as requested
+        # Base Logic
+        action = "HOLD"
+        confidence = 0.0
+        reason = ""
         
         if rsi < 50:
+            action = "BUY"
             confidence = (50 - rsi) / 50.0
-            # Boost confidence to ensure trade execution
-            return "BUY", max(0.7, confidence), f"Range Low (RSI {rsi:.1f})"
+            reason = f"Range Low (RSI {rsi:.1f})"
         elif rsi > 50:
+            action = "SELL"
             confidence = (rsi - 50) / 50.0
-            # Boost confidence to ensure trade execution
-            return "SELL", max(0.7, confidence), f"Range High (RSI {rsi:.1f})"
+            reason = f"Range High (RSI {rsi:.1f})"
             
-        # Only hold if exactly 50.0
-        return "HOLD", 0.0, "Equilibrium (Exact 50.0)"
+        # [HIGHEST INTELLIGENCE] Holographic Filter
+        if pressure and action != "HOLD":
+            dom = pressure.get('dominance', 'NEUTRAL')
+            intensity = pressure.get('intensity', 'NORMAL')
+            
+            if action == "BUY":
+                if dom == "BUY":
+                    confidence += 0.1
+                    reason += " + Buy Pressure"
+                elif dom == "SELL" and intensity == "HIGH":
+                    confidence -= 0.2
+                    reason += " - High Sell Pressure"
+            elif action == "SELL":
+                if dom == "SELL":
+                    confidence += 0.1
+                    reason += " + Sell Pressure"
+                elif dom == "BUY" and intensity == "HIGH":
+                    confidence -= 0.2
+                    reason += " - High Buy Pressure"
+                    
+        # Boost confidence to ensure trade execution (unless penalized)
+        if action != "HOLD":
+            confidence = max(0.6, confidence) # Minimum 0.6 to trigger
+            
+        return action, confidence, reason
 
 class TrendWorker(BaseWorker):
     """
@@ -55,14 +79,43 @@ class TrendWorker(BaseWorker):
     def get_signal(self, market_data: Dict[str, Any]) -> Tuple[str, float, str]:
         trend_strength = market_data.get('trend_strength', 0.0)
         rsi = market_data.get('rsi', 50.0)
+        pressure = market_data.get('pressure_metrics', {})
         
-        # Aggressive Trend Following
-        # If Trend is Up (RSI > 50 usually in uptrend) -> BUY
-        # If Trend is Down (RSI < 50 usually in downtrend) -> SELL
+        # Base Logic
+        action = "HOLD"
+        confidence = 0.0
+        reason = ""
         
         if rsi > 50:
-            return "BUY", max(0.6, trend_strength), f"Uptrend Momentum (RSI {rsi:.1f})"
+            action = "BUY"
+            confidence = trend_strength
+            reason = f"Uptrend Momentum (RSI {rsi:.1f})"
         elif rsi < 50:
-            return "SELL", max(0.6, trend_strength), f"Downtrend Momentum (RSI {rsi:.1f})"
+            action = "SELL"
+            confidence = trend_strength
+            reason = f"Downtrend Momentum (RSI {rsi:.1f})"
             
-        return "HOLD", 0.0, "Neutral"
+        # [HIGHEST INTELLIGENCE] Holographic Filter
+        if pressure and action != "HOLD":
+            dom = pressure.get('dominance', 'NEUTRAL')
+            intensity = pressure.get('intensity', 'NORMAL')
+            
+            if action == "BUY":
+                if dom == "BUY":
+                    confidence += 0.15
+                    reason += " + Buy Pressure"
+                elif dom == "SELL":
+                    confidence -= 0.1
+                    reason += " - Sell Pressure"
+            elif action == "SELL":
+                if dom == "SELL":
+                    confidence += 0.15
+                    reason += " + Sell Pressure"
+                elif dom == "BUY":
+                    confidence -= 0.1
+                    reason += " - Buy Pressure"
+
+        if action != "HOLD":
+             confidence = max(0.6, confidence)
+
+        return action, confidence, reason

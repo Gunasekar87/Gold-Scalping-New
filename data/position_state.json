@@ -29,24 +29,23 @@
     "XAUUSD": {
       "bucket_id": "XAUUSD",
       "positions": [
-        214984458,
-        214984459
+        215469904
       ],
-      "net_profit": -0.19,
-      "open_time": 1765860670.5397518,
-      "last_update": 1765860672.0203958,
+      "net_profit": -0.15,
+      "open_time": 1765956551.2046244,
+      "last_update": 1765956551.2046244,
       "closed": false,
       "state": "single_active",
       "mode": "single",
-      "last_state_check": 1765860670.5397518,
+      "last_state_check": 1765956551.2046244,
       "exit_reason": "",
-      "last_recovery_time": 1765860671.6148202
+      "last_recovery_time": 0.0
     }
   },
   "closed_buckets": [
-    "XAUUSD",
     "XAUUSD_0",
-    "XAUUSD_1"
+    "XAUUSD_1",
+    "XAUUSD"
   ],
   "active_learning_trades": {
     "209122073": {
@@ -307,36 +306,36 @@
         "zone_width_pips": "54.86"
       }
     },
-    "214984458": {
+    "215469904": {
       "symbol": "XAUUSD",
       "type": "BUY",
-      "entry_price": 4289.19,
-      "entry_tp_pips": 29.035714285714675,
+      "entry_price": 4323.54,
+      "entry_tp_pips": 59.01428571428369,
       "entry_sl_pips": 0.0,
-      "entry_atr": 0.9678571428571558,
+      "entry_atr": 1.9671428571427896,
       "obs": [
         0.0,
-        0.9678571428571558,
+        1.9671428571427896,
         0.0,
-        0.7
+        0.6
       ],
       "action": [
         1.0,
         0.8
       ],
-      "open_time": 1765860670.1182055,
+      "open_time": 1765956550.816555,
       "hedge_plan": {
-        "hedge1_trigger_price": 4288.948035714286,
-        "hedge2_trigger_price": 4289.19,
-        "hedge3_trigger_price": 4288.875446428571,
-        "hedge4_trigger_price": 4289.19,
-        "hedge1_lots": 0.04,
-        "hedge2_lots": 0.14,
-        "hedge3_lots": 0.52,
-        "hedge4_lots": 1.92,
-        "zone_width_pips": "24.20"
+        "hedge1_trigger_price": 4323.0482142857145,
+        "hedge2_trigger_price": 4323.54,
+        "hedge3_trigger_price": 4322.900678571429,
+        "hedge4_trigger_price": 4323.54,
+        "hedge1_lots": 0.02,
+        "hedge2_lots": 0.04,
+        "hedge3_lots": 0.1,
+        "hedge4_lots": 0.25,
+        "zone_width_pips": "49.18"
       }
     }
   },
-  "timestamp": 1765860672.0203958
+  "timestamp": 1765956551.2046244
 }

@@ -29,6 +29,8 @@ from .infrastructure.async_database import (
 )
 from .utils.trading_logger import TradingLogger, DecisionTracker, format_pips
 from .utils.news_filter import NewsFilter
+from .utils.news_calendar import NewsCalendar
+from .ai_core.tick_pressure import TickPressureAnalyzer
 
 # [AI INTELLIGENCE] New Policy & Governance Modules
 from src.config.settings import FLAGS, POLICY as _PTUNE, RISK as _RLIM
@@ -107,6 +109,8 @@ class TradingEngine:
         self.trend_worker = TrendWorker()
         self.hedge_intel = HedgeIntelligence(self.config) # [NEW] Initialize Oracle
         self.news_filter = NewsFilter() # [AI INTELLIGENCE] Initialize News Filter
+        self.news_calendar = NewsCalendar() # [HIGHEST INTELLIGENCE] Event Horizon
+        self.tick_analyzer = TickPressureAnalyzer() # [HIGHEST INTELLIGENCE] Tick Pressure
 
         # [AI INTELLIGENCE] Initialize Policy & Governance
         self._telemetry = TelemetryWriter()
@@ -189,6 +193,10 @@ class TradingEngine:
         # Check basic market data validity
         if not tick or 'bid' not in tick or 'ask' not in tick:
             return False, "Invalid tick data"
+
+        # [HIGHEST INTELLIGENCE] Check Event Horizon (News Blackout)
+        if self.news_calendar.is_blackout_period(symbol):
+            return False, "News Blackout (Event Horizon)"
 
         # Check spread
         # Adjust multiplier for JPY and XAU pairs
@@ -860,6 +868,13 @@ class TradingEngine:
                      logger.info(f"[SNIPER] Smart Unwind executed for {bucket_id}")
                      return True # Positions changed
 
+        # [HIGHEST INTELLIGENCE] LAYER 2: THE ERASER (Tactical De-Risking)
+        if len(positions) > 1 and bucket_id:
+            erased = await self.position_manager.execute_eraser_logic(bucket_id, self.broker)
+            if erased:
+                logger.info(f"[ERASER] Tactical De-Risking executed for {bucket_id}")
+                return True # Positions changed
+
         # Check if bucket should be closed
         # Prepare market data for intelligent scalping analysis
         atr_value = self.market_data.calculate_atr(symbol, 14)
@@ -1035,7 +1050,7 @@ class TradingEngine:
             logger.info(f"[ZONE_CHECK] Calling execute_zone_recovery for {symbol} with {len(positions_dict)} positions | ATR: {atr_value:.5f} | VolRatio: {volatility_ratio:.2f}")
             zone_recovery_executed = self.risk_manager.execute_zone_recovery(
                 self.broker, symbol, positions_dict, tick, point_value,
-                shield, ppo_guardian, self.position_manager, nexus, atr_val=atr_value,
+                shield, ppo_guardian, self.position_manager, nexus, oracle=oracle, atr_val=atr_value,
                 volatility_ratio=volatility_ratio, rsi_value=rsi_value
             )
             if zone_recovery_executed:
@@ -1131,6 +1146,10 @@ class TradingEngine:
             if not tick:
                 print(f">>> [DEBUG] No tick data for {symbol} (Check MT5 Connection/Market Watch)", flush=True)
                 return
+
+            # [HIGHEST INTELLIGENCE] Update Tick Pressure Analyzer
+            self.tick_analyzer.add_tick(tick)
+            pressure_metrics = self.tick_analyzer.get_pressure_metrics()
 
             # Record market data to database
             await self._record_market_data(symbol, tick)
@@ -1235,7 +1254,8 @@ class TradingEngine:
                 'macro_context': self.market_data.get_macro_context(),
                 'rsi': rsi_value,
                 'trend_strength': trend_strength,
-                'atr': atr_value
+                'atr': atr_value,
+                'pressure_metrics': pressure_metrics # [HIGHEST INTELLIGENCE]
             }
             
             action, confidence, reason = "HOLD", 0.0, "No Worker"
@@ -1305,6 +1325,15 @@ class TradingEngine:
                     oracle_penalty = 0.5
                     logger.info(f"[ORACLE] CAUTION: Signal contradicts Oracle. Reducing lots by 50%.")
 
+            # --- HOLOGRAPHIC FILTER (TICK PRESSURE) ---
+            # If Order Flow Pressure strongly disagrees, reduce lot size
+            pressure_penalty = 1.0
+            if pressure_metrics['intensity'] == 'HIGH':
+                if (signal.action == TradeAction.BUY and pressure_metrics['dominance'] == 'SELL') or \
+                   (signal.action == TradeAction.SELL and pressure_metrics['dominance'] == 'BUY'):
+                    pressure_penalty = 0.5
+                    logger.info(f"[HOLOGRAPHIC] CAUTION: High Intensity Counter-Pressure. Reducing lots by 50%.")
+
             # --- LAYER 9: GLOBAL BRAIN (SOFT PENALTY) ---
             # Check DXY/US10Y impact on Gold
             global_bias = 0.0
@@ -1340,9 +1369,9 @@ class TradingEngine:
             )
             
             # === APPLY INTELLIGENCE PENALTIES ===
-            # Combine all penalties (Regime * Oracle * Brain)
-            # Example: 0.5 * 0.5 * 1.0 = 0.25 (Quarter Size)
-            total_penalty = regime_penalty * oracle_penalty * brain_penalty
+            # Combine all penalties (Regime * Oracle * Brain * Pressure)
+            # Example: 0.5 * 0.5 * 1.0 * 1.0 = 0.25 (Quarter Size)
+            total_penalty = regime_penalty * oracle_penalty * brain_penalty * pressure_penalty
             
             if total_penalty < 1.0:
                 old_lot = lot_size
