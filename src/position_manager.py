@@ -1634,12 +1634,11 @@ class PositionManager:
             
         return True
 
-    async def execute_eraser_logic(self, bucket_id: str, broker) -> bool:
+    async def execute_eraser_logic(self, bucket_id: str, broker, market_data: Dict = None, ai_context: Dict = None) -> bool:
         """
-        Executes 'The Eraser' (Tactical De-Risking).
-        1. Identifies 'God Mode' trade (Layer 5+).
-        2. Checks if it has enough profit to cover the worst losing trade.
-        3. Closes both to reduce exposure (De-Leveraging).
+        v5.4.0: THE NEXUS HARVESTER (God Tier)
+        Combines Partial Scalping with AI Trajectory Prediction.
+        Only harvests the winner when the AI says the move is 'exhausted'.
         """
         with self._lock:
             if bucket_id not in self.bucket_stats:
@@ -1649,37 +1648,85 @@ class PositionManager:
         if len(positions) < 2:
             return False 
 
-        # Sort by time (oldest first)
-        positions.sort(key=lambda p: p.time)
+        # 1. Identify the "God Mode" Trade (Best Winner)
+        # We look for the trade with the highest raw profit
+        sorted_by_profit = sorted(positions, key=lambda x: x.profit, reverse=True)
+        best_winner = sorted_by_profit[0]
         
-        # Identify God Mode Trade (Last one, if we have a stack)
-        # We assume the last trade is the largest/most recent hedge
-        god_mode_trade = positions[-1]
-        
-        # Check if it's actually profitable
-        if god_mode_trade.profit <= 0:
+        if best_winner.profit <= 10.0:  # Minimum $10 profit to activate
             return False
-            
-        # Find the worst loser (usually the first one, or the one with most negative profit)
-        worst_loser = min(positions[:-1], key=lambda p: p.profit)
-        
+
+        # 2. Identify the "Target" (Worst Loser)
+        sorted_by_loss = sorted(positions, key=lambda x: x.profit)
+        worst_loser = sorted_by_loss[0]
+
         if worst_loser.profit >= 0:
             return False # No losers to erase
-            
-        # Buffer: Ensure we cover spread/commissions + small profit
-        # $10 buffer or 10% of profit
-        buffer = 10.0 
+
+        winner_profit = best_winner.profit
+        loser_loss = abs(worst_loser.profit)
         
-        if god_mode_trade.profit > (abs(worst_loser.profit) + buffer):
-            logger.info(f"[ERASER] Opportunity Detected! God Mode Profit: ${god_mode_trade.profit:.2f} covers Loser: ${worst_loser.profit:.2f}")
+        # 3. AI Context Check (The Nexus Harvester Upgrade)
+        # We look at the 'pressure' and 'rsi' from the latest market data
+        if market_data and ai_context:
+            current_rsi = market_data.get('rsi', 50.0)
+            # pressure_dominance might be in ai_context or we derive it
+            pressure_dominance = ai_context.get('pressure_dominance', 0.0) 
             
-            # Execute The Eraser
-            # Close God Mode first to secure profit
-            await broker.close_position(god_mode_trade.ticket)
-            # Close Loser
+            trade_type = best_winner.type # 0=Buy, 1=Sell
+            
+            # DECISION MATRIX: Should we hold for more profit?
+            should_hold = False
+            
+            if trade_type == 0: # BUY Trade
+                # Hold if RSI is not yet overbought AND Buying Pressure is strong
+                if current_rsi < 70 and pressure_dominance > 0.2:
+                    should_hold = True
+                    logger.info(f"[HARVESTER] Holding Winner (+{winner_profit:.2f}) - Momentum is Strong (RSI {current_rsi:.1f}, Press {pressure_dominance:.2f})")
+            
+            elif trade_type == 1: # SELL Trade
+                # Hold if RSI is not yet oversold AND Selling Pressure is strong
+                if current_rsi > 30 and pressure_dominance < -0.2:
+                    should_hold = True
+                    logger.info(f"[HARVESTER] Holding Winner (+{winner_profit:.2f}) - Momentum is Strong (RSI {current_rsi:.1f}, Press {pressure_dominance:.2f})")
+
+            if should_hold:
+                return False # EXIT. We let the profit grow.
+
+        # 4. Execution (The Scalpel)
+        
+        # BUFFER: We want to keep $5.00 net profit after the operation
+        buffer = 5.0 
+        
+        # SCENARIO A: FULL ERASE (Winner covers entire Loser)
+        if winner_profit > (loser_loss + buffer):
+            logger.info(f"[ERASER] FULL ERASE: Winner (+{winner_profit:.2f}) covers Loser (-{loser_loss:.2f})")
+            await broker.close_position(best_winner.ticket)
             await broker.close_position(worst_loser.ticket)
+            return True
+
+        # SCENARIO B: PARTIAL SCALPEL (Winner covers PART of Loser)
+        available_cash = winner_profit - buffer
+        if available_cash < 5.0: # Only scalp if we have decent ammo
+            return False
+
+        loss_per_lot = loser_loss / worst_loser.volume
+        
+        # Calculate volume to close: Available Cash / Loss per Lot
+        volume_to_close = available_cash / loss_per_lot
+        
+        # Round down to nearest 0.01
+        volume_to_close = int(volume_to_close * 100) / 100.0
+        
+        if volume_to_close >= 0.01:
+            logger.info(f"[HARVESTER] STRIKE! Momentum faded. Using +{winner_profit:.2f} to scalp {volume_to_close} lots of loser.")
             
-            logger.info(f"[ERASER] TACTICAL DE-RISKING COMPLETE. Reduced stack size.")
+            # 1. Close the Winner to bank the cash
+            await broker.close_position(best_winner.ticket)
+            
+            # 2. Partially close the loser
+            await broker.close_position(worst_loser.ticket, volume=volume_to_close)
+            
             return True
             
         return False

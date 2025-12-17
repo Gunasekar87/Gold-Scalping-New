@@ -1,4 +1,21 @@
-﻿v5.3.0 (HIGHEST INTELLIGENCE: THE SINGULARITY) - 2025-12-17
+﻿v5.4.0 (THE NEXUS HARVESTER) - 2025-12-17
+----------------------------------------------------------------
+[NEW] The Nexus Harvester: AI-Timed Partial Scalping (God Tier Recovery)
+      - Replaces standard "Eraser" with AI-driven decision matrix.
+      - Checks RSI & Tick Pressure before scalping.
+      - Holds winning trades if momentum is strong (Maximizes "Ammo").
+      - Strikes immediately when momentum fades.
+      - Uses "The Scalpel" logic to surgically remove parts of losing trades.
+[NEW] MT5Adapter: Added support for Partial Closing (Volume-based).
+[FIX] TradingEngine: Integrated Pressure Metrics into Position Management loop.
+----------------------------------------------------------------
+
+v5.3.1 (DYNAMIC SLIPPAGE PAD) - 2025-12-17
+----------------------------------------------------------------
+[NEW] RiskManager: Dynamic Slippage Pad (Widens TP in high volatility)
+----------------------------------------------------------------
+
+v5.3.0 (HIGHEST INTELLIGENCE: THE SINGULARITY) - 2025-12-17
 ----------------------------------------------------------------
 [NEW] Holographic View: TickPressureAnalyzer (Order Flow/Velocity)
 [NEW] The Eraser: Tactical De-Risking (God Mode Pair Closing)

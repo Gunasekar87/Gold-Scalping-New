@@ -783,7 +783,7 @@ class TradingEngine:
 
     async def process_position_management(self, symbol: str, positions: List[Dict],
                                   tick: Dict, point: float, shield, ppo_guardian,
-                                  nexus=None, rsi_value: float = 50.0, oracle=None) -> bool:
+                                  nexus=None, rsi_value: float = 50.0, oracle=None, pressure_metrics=None) -> bool:
         """
         Process position management for a symbol.
 
@@ -796,6 +796,7 @@ class TradingEngine:
             ppo_guardian: PPO Guardian instance
             nexus: Optional NexusBrain instance
             oracle: Optional Oracle instance (Layer 4)
+            pressure_metrics: Optional Tick Pressure Metrics
 
         Returns:
             True if positions were managed (closed/opened)
@@ -847,6 +848,30 @@ class TradingEngine:
         else:
             logger.debug(f"[BUCKET] REUSING EXISTING: {bucket_id} for {len(positions)} positions")
 
+        # Prepare market data for intelligent scalping analysis (MOVED UP)
+        atr_value = self.market_data.calculate_atr(symbol, 14)
+        trend_strength = self.market_data.calculate_trend_strength(symbol, 20)
+        
+        # [GOD MODE] Fetch candles for Structure Analysis
+        candles = self.market_data.candles.get_history(symbol)
+        
+        market_data = {
+            'atr': atr_value,  # ATR in points
+            'spread': abs(tick['ask'] - tick['bid']),  # Spread in points
+            'trend_strength': trend_strength,  # Trend strength 0-1
+            'current_price': (tick['ask'] + tick['bid']) / 2,
+            'bid': tick['bid'], # Explicit Bid
+            'ask': tick['ask'], # Explicit Ask
+            'point': point,  # Point value for pip calculations
+            'candles': candles, # Pass full history for structure analysis
+            'rsi': rsi_value # Add RSI here
+        }
+        
+        ai_context = {
+            'pressure_metrics': pressure_metrics,
+            'pressure_dominance': pressure_metrics.get('pressure_dominance', 0.0) if pressure_metrics else 0.0
+        }
+
         # [AI SNIPER] Check for Smart Unwind Opportunity
         if oracle and len(positions) > 1 and bucket_id:
              # Prepare market data history for Oracle
@@ -870,29 +895,14 @@ class TradingEngine:
 
         # [HIGHEST INTELLIGENCE] LAYER 2: THE ERASER (Tactical De-Risking)
         if len(positions) > 1 and bucket_id:
-            erased = await self.position_manager.execute_eraser_logic(bucket_id, self.broker)
+            # Pass market_data and ai_context to Eraser
+            erased = await self.position_manager.execute_eraser_logic(bucket_id, self.broker, market_data, ai_context)
             if erased:
                 logger.info(f"[ERASER] Tactical De-Risking executed for {bucket_id}")
                 return True # Positions changed
 
         # Check if bucket should be closed
-        # Prepare market data for intelligent scalping analysis
-        atr_value = self.market_data.calculate_atr(symbol, 14)
-        trend_strength = self.market_data.calculate_trend_strength(symbol, 20)
-        
-        # [GOD MODE] Fetch candles for Structure Analysis
-        candles = self.market_data.candles.get_history(symbol)
-        
-        market_data = {
-            'atr': atr_value,  # ATR in points
-            'spread': abs(tick['ask'] - tick['bid']),  # Spread in points
-            'trend_strength': trend_strength,  # Trend strength 0-1
-            'current_price': (tick['ask'] + tick['bid']) / 2,
-            'bid': tick['bid'], # Explicit Bid
-            'ask': tick['ask'], # Explicit Ask
-            'point': point,  # Point value for pip calculations
-            'candles': candles # Pass full history for structure analysis
-        }
+        # (market_data is already prepared)
 
         # Periodic position status update (every 5 seconds) to show AI is monitoring
         current_time = time.time()
@@ -1196,7 +1206,7 @@ class TradingEngine:
             
             if positions:
                 # MANAGEMENT MODE
-                await self._process_existing_positions(symbol, tick, shield, ppo_guardian, nexus, oracle)
+                await self._process_existing_positions(symbol, tick, shield, ppo_guardian, nexus, oracle, pressure_metrics)
                 return # STRICTLY RETURN - No new entries while positions exist
 
             # HUNTING MODE
@@ -1621,7 +1631,7 @@ class TradingEngine:
                                f"Holding {symbol} positions defensively (No new risk added).")
                 setattr(self, f"_plan_b_veto_{symbol}", True)
 
-    async def _process_existing_positions(self, symbol: str, tick: Dict, shield, ppo_guardian, nexus, oracle=None) -> bool:
+    async def _process_existing_positions(self, symbol: str, tick: Dict, shield, ppo_guardian, nexus, oracle=None, pressure_metrics=None) -> bool:
         """
         Process management for existing positions.
         Returns True if positions were managed (skipping new entries).
@@ -2009,7 +2019,7 @@ class TradingEngine:
             
             positions_managed = await self.process_position_management(
                 symbol, [p.__dict__ for p in symbol_positions], tick,
-                point_value, shield, ppo_guardian, nexus, rsi_value=current_rsi, oracle=oracle
+                point_value, shield, ppo_guardian, nexus, rsi_value=current_rsi, oracle=oracle, pressure_metrics=pressure_metrics
             )
             
             logger.debug(f"[PROCESS_POS] process_position_management returned: {positions_managed}")

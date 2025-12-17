@@ -370,10 +370,11 @@ class MT5Adapter(BrokerAdapter):
         tickets = [p.ticket if hasattr(p, 'ticket') else p['ticket'] for p in positions_data]
         return {ticket: result for ticket, result in zip(tickets, results)}
 
-    async def close_position(self, ticket: int) -> bool:
+    async def close_position(self, ticket: int, volume: float = None) -> bool:
         """
         Close a single position by ticket.
         Wrapper around close_positions for single ticket convenience.
+        Supports PARTIAL closing if volume is specified.
         """
         # We need to find the position details first because close_positions needs volume/symbol
         # Try to get from MT5 directly
@@ -389,8 +390,26 @@ class MT5Adapter(BrokerAdapter):
             logger.warning(f"Cannot close position {ticket}: Not found in broker")
             return False
             
-        # Reuse the bulk closer for consistency
-        result = await self.close_positions([target_pos])
+        # If volume is specified, we need to create a copy of the position data with the new volume
+        if volume:
+             # Create a dict representation with the override volume
+             # Note: target_pos might be an object or dict. Handle both.
+             t_ticket = target_pos.ticket if hasattr(target_pos, 'ticket') else target_pos['ticket']
+             t_symbol = target_pos.symbol if hasattr(target_pos, 'symbol') else target_pos['symbol']
+             t_type = target_pos.type if hasattr(target_pos, 'type') else target_pos['type']
+             t_magic = target_pos.magic if hasattr(target_pos, 'magic') else target_pos['magic']
+             
+             pos_data = {
+                 'ticket': t_ticket,
+                 'symbol': t_symbol,
+                 'volume': volume, # OVERRIDE
+                 'type': t_type,
+                 'magic': t_magic
+             }
+             # Use close_positions with this single item
+             result = await self.close_positions([pos_data])
+        else:
+             result = await self.close_positions([target_pos])
         
         # Check result
         if ticket in result:

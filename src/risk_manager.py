@@ -296,12 +296,20 @@ class RiskManager:
         if atr_pips > 50.0:
              zone_pips = max(zone_pips, atr_pips * 0.8)
 
-        tp_pips = zone_pips # TP usually matches zone width in this strategy
+        # [INTELLIGENCE UPGRADE] Dynamic Slippage Pad
+        # If market is fast (High ATR), add padding to TP to ensure we clear the spread + slippage.
+        # Pad = 10% of ATR.
+        slippage_pad_pips = 0.0
+        if atr_pips > 20.0: # Volatile
+             slippage_pad_pips = atr_pips * 0.10
+             logger.info(f"[SLIPPAGE PAD] Added {slippage_pad_pips:.1f} pips to TP for volatility")
+
+        tp_pips = zone_pips + slippage_pad_pips
         
         zone_width_points = zone_pips * point
         tp_width_points = tp_pips * point
         
-        logger.info(f"[SURVIVAL] Grid Level {num_positions} -> Zone Width: {zone_pips:.1f} pips")
+        logger.info(f"[SURVIVAL] Grid Level {num_positions} -> Zone Width: {zone_pips:.1f} pips | TP: {tp_pips:.1f} pips")
 
         return zone_width_points, tp_width_points
 
