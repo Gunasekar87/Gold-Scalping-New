@@ -1126,7 +1126,7 @@ class TradingEngine:
             if positions:
                 for pos in positions:
                     ticket = pos.get('ticket') if isinstance(pos, dict) else pos.ticket
-                    self.broker.close_position(ticket)
+                    await self.broker.close_position(ticket)
                     logger.critical(f"[DOOMSDAY] Closed ticket {ticket}")
             
             # Raise flag to stop bot

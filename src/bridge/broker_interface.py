@@ -15,6 +15,7 @@ class Position:
     swap: float
     comment: str
     time: int
+    magic: int = 0 # Added magic number field
 
 @dataclass
 class Deal:

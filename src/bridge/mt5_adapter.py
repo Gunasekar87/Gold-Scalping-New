@@ -205,7 +205,8 @@ class MT5Adapter(BrokerAdapter):
                 profit=p.profit,
                 swap=p.swap,
                 comment=p.comment,
-                time=p.time
+                time=p.time,
+                magic=p.magic
             ) for p in positions]
 
     def get_history_deals(self, ticket: int) -> list:
