@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from threading import Lock, RLock
 from enum import Enum
 import MetaTrader5 as mt5
+from .ai_core.architect import Architect
 
 # Import TradingLogger for structured exit summaries
 try:
@@ -126,11 +127,14 @@ class PositionManager:
     - State persistence for crash recovery
     """
 
-    def __init__(self, state_file: str = "data/position_state.json"):
+    def __init__(self, mt5_adapter=None, state_file: str = "data/position_state.json"):
         self.state_file = state_file
         self._lock = RLock()  # Reentrant lock for thread safety
         self._position_locks: Dict[int, Lock] = {}  # Per-position locks for synchronous operations
         self._state_transition_lock = Lock()  # Protects state transitions
+        
+        # v5.5.0: Initialize Architect
+        self.architect = Architect(mt5_adapter) if mt5_adapter else None
 
         # Core state
         self.active_positions: Dict[int, Position] = {}
@@ -1672,23 +1676,34 @@ class PositionManager:
             current_rsi = market_data.get('rsi', 50.0)
             # pressure_dominance might be in ai_context or we derive it
             pressure_dominance = ai_context.get('pressure_dominance', 0.0) 
-            
-            trade_type = best_winner.type # 0=Buy, 1=Sell
-            
+            # v5.5.0: ARCHITECT TRIGGER (The Wall Check)
+            hit_wall = False
+            if self.architect:
+                structure = self.architect.get_market_structure(best_winner.symbol)
+                if structure:
+                    if trade_type == 0 and structure['status'] == 'BLOCKED_UP': # Buy hitting Resistance
+                        hit_wall = True
+                        logger.info(f"[ARCHITECT] TRIGGER: Winner hitting Resistance at {structure['resistance']:.2f}. HARVEST NOW.")
+                    elif trade_type == 1 and structure['status'] == 'BLOCKED_DOWN': # Sell hitting Support
+                        hit_wall = True
+                        logger.info(f"[ARCHITECT] TRIGGER: Winner hitting Support at {structure['support']:.2f}. HARVEST NOW.")
+
             # DECISION MATRIX: Should we hold for more profit?
             should_hold = False
             
-            if trade_type == 0: # BUY Trade
-                # Hold if RSI is not yet overbought AND Buying Pressure is strong
-                if current_rsi < 70 and pressure_dominance > 0.2:
-                    should_hold = True
-                    logger.info(f"[HARVESTER] Holding Winner (+{winner_profit:.2f}) - Momentum is Strong (RSI {current_rsi:.1f}, Press {pressure_dominance:.2f})")
-            
-            elif trade_type == 1: # SELL Trade
-                # Hold if RSI is not yet oversold AND Selling Pressure is strong
-                if current_rsi > 30 and pressure_dominance < -0.2:
-                    should_hold = True
-                    logger.info(f"[HARVESTER] Holding Winner (+{winner_profit:.2f}) - Momentum is Strong (RSI {current_rsi:.1f}, Press {pressure_dominance:.2f})")
+            # Only hold if we haven't hit a wall AND momentum is strong
+            if not hit_wall:
+                if trade_type == 0: # BUY Trade
+                    # Hold if RSI is not yet overbought AND Buying Pressure is strong
+                    if current_rsi < 70 and pressure_dominance > 0.2:
+                        should_hold = True
+                        logger.info(f"[HARVESTER] Holding Winner (+{winner_profit:.2f}) - Momentum is Strong (RSI {current_rsi:.1f}, Press {pressure_dominance:.2f})")
+                
+                elif trade_type == 1: # SELL Trade
+                    # Hold if RSI is not yet oversold AND Selling Pressure is strong
+                    if current_rsi > 30 and pressure_dominance < -0.2:
+                        should_hold = True
+                        logger.info(f"[HARVESTER] Holding Winner (+{winner_profit:.2f}) - Momentum is Strong (RSI {current_rsi:.1f}, Press {pressure_dominance:.2f})")
 
             if should_hold:
                 return False # EXIT. We let the profit grow.
@@ -1706,20 +1721,41 @@ class PositionManager:
             return True
 
         # SCENARIO B: PARTIAL SCALPEL (Winner covers PART of Loser)
+        # v5.5.0 FIX: Calculate volume based on VALUE, not Lot Size.
+        # Previous logic: loss_per_lot = loser_loss / worst_loser.volume (This assumes linear scaling which is roughly correct but can be off due to slippage/spread)
+        # Better approach: Calculate exact cost to close 1 lot at CURRENT price.
+        
         available_cash = winner_profit - buffer
         if available_cash < 5.0: # Only scalp if we have decent ammo
             return False
 
-        loss_per_lot = loser_loss / worst_loser.volume
+        # Calculate Loss Per Lot accurately based on current market price
+        # Loss = Volume * ContractSize * (Entry - Current)
+        # So LossPerLot = ContractSize * abs(Entry - Current)
         
+        current_price = market_data.get('ask') if worst_loser.type == 1 else market_data.get('bid')
+        if not current_price:
+             # Fallback to simple division if no market data (less accurate but safe)
+             loss_per_lot = loser_loss / worst_loser.volume
+        else:
+             contract_size = 100.0 if "XAU" in worst_loser.symbol or "GOLD" in worst_loser.symbol else 100000.0
+             price_diff = abs(worst_loser.price_open - current_price)
+             loss_per_lot = price_diff * contract_size
+        
+        if loss_per_lot <= 0:
+             loss_per_lot = 999999.0 # Prevent division by zero
+
         # Calculate volume to close: Available Cash / Loss per Lot
         volume_to_close = available_cash / loss_per_lot
         
         # Round down to nearest 0.01
         volume_to_close = int(volume_to_close * 100) / 100.0
         
+        # Safety Cap: Don't close more than the loser actually has
+        volume_to_close = min(volume_to_close, worst_loser.volume)
+        
         if volume_to_close >= 0.01:
-            logger.info(f"[HARVESTER] STRIKE! Momentum faded. Using +{winner_profit:.2f} to scalp {volume_to_close} lots of loser.")
+            logger.info(f"[HARVESTER] STRIKE! Profit: ${winner_profit:.2f}. Closing {volume_to_close} lots of loser (Cost: ~${volume_to_close * loss_per_lot:.2f})")
             
             # 1. Close the Winner to bank the cash
             await broker.close_position(best_winner.ticket)

@@ -12,7 +12,7 @@ The bot orchestrates:
 
 Author: AETHER Development Team
 License: MIT
-Version: 5.4.0
+Version: 5.5.0
 """
 
 import asyncio
@@ -168,7 +168,8 @@ class AetherBot:
             timeframe = self.config.get('trading', {}).get('timeframe', 'M1')
             self.market_data = MarketDataManager(self.broker, timeframe, self.config)
 
-            self.position_manager = PositionManager()
+            # v5.5.0: Pass broker to PositionManager for Architect
+            self.position_manager = PositionManager(mt5_adapter=self.broker)
             
             # CRITICAL: Sync position state with broker to remove stale positions
             logger.info("3. Synchronizing Positions...")
@@ -223,14 +224,20 @@ class AetherBot:
             self.global_brain = GlobalBrain(self.market_data)
             print(">>> [INIT] Global Brain Online.", flush=True)
 
+            # v5.5.0: Initialize TickPressureAnalyzer shared instance
+            from .ai_core.tick_pressure import TickPressureAnalyzer
+            self.tick_analyzer = TickPressureAnalyzer()
+
             # Initialize Oracle (Layer 4)
             print(">>> [INIT] Loading Oracle (Price Prediction)...", flush=True)
-            self.oracle = Oracle()
+            # v5.5.0: Pass broker and tick_analyzer to Oracle
+            self.oracle = Oracle(mt5_adapter=self.broker, tick_analyzer=self.tick_analyzer)
             print(">>> [INIT] Oracle Online.", flush=True)
 
             print(">>> [INIT] Starting Trading Engine...", flush=True)
             self.trading_engine = TradingEngine(trading_config, self.broker, self.market_data,
-                                              self.position_manager, self.risk_manager, db_manager, self.ppo_guardian, self.global_brain)
+                                              self.position_manager, self.risk_manager, db_manager, self.ppo_guardian, self.global_brain,
+                                              tick_analyzer=self.tick_analyzer)
             print(">>> [INIT] Trading Engine Ready.", flush=True)
 
             # Initialize database components

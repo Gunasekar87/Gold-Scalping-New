@@ -30,22 +30,24 @@
       "bucket_id": "XAUUSD",
       "positions": [
         215610728,
-        215661812
+        215661812,
+        215706688,
+        215742791
       ],
-      "net_profit": -42.64,
-      "open_time": 1765985887.389369,
-      "last_update": 1765985940.939078,
+      "net_profit": -25.21,
+      "open_time": 1765990280.0346572,
+      "last_update": 1765991982.1698682,
       "closed": false,
       "state": "bucket_active",
       "mode": "bucket",
-      "last_state_check": 1765985887.389369,
+      "last_state_check": 1765990280.0346572,
       "exit_reason": "",
       "last_recovery_time": 0.0
     }
   },
   "closed_buckets": [
-    "XAUUSD_1",
     "XAUUSD",
+    "XAUUSD_1",
     "XAUUSD_0"
   ],
   "active_learning_trades": {
@@ -338,7 +340,39 @@
         0.8
       ],
       "open_time": 1765985184.95546
+    },
+    "215706688": {
+      "symbol": "XAUUSD",
+      "type": "SELL",
+      "entry_price": 4323.45,
+      "obs": [
+        5.00000000001819,
+        0.001,
+        0.0,
+        0.0
+      ],
+      "action": [
+        1.0,
+        0.8
+      ],
+      "open_time": 1765988556.1271942
+    },
+    "215742791": {
+      "symbol": "XAUUSD",
+      "type": "BUY",
+      "entry_price": 4336.42,
+      "obs": [
+        1292.0000000000073,
+        0.001,
+        0.0,
+        0.0
+      ],
+      "action": [
+        1.0,
+        0.8
+      ],
+      "open_time": 1765991982.167359
     }
   },
-  "timestamp": 1765985944.4464102
+  "timestamp": 1765991982.1698682
 }

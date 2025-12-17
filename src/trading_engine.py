@@ -90,7 +90,7 @@ class TradingEngine:
     - Integration with all trading components
     """
 
-    def __init__(self, config: TradingConfig, broker_adapter, market_data, position_manager, risk_manager, db_manager: Optional[AsyncDatabaseManager] = None, ppo_guardian=None, global_brain=None):
+    def __init__(self, config: TradingConfig, broker_adapter, market_data, position_manager, risk_manager, db_manager: Optional[AsyncDatabaseManager] = None, ppo_guardian=None, global_brain=None, tick_analyzer=None):
         self.config = config
         self.broker = broker_adapter
         self.market_data = market_data
@@ -110,7 +110,7 @@ class TradingEngine:
         self.hedge_intel = HedgeIntelligence(self.config) # [NEW] Initialize Oracle
         self.news_filter = NewsFilter() # [AI INTELLIGENCE] Initialize News Filter
         self.news_calendar = NewsCalendar() # [HIGHEST INTELLIGENCE] Event Horizon
-        self.tick_analyzer = TickPressureAnalyzer() # [HIGHEST INTELLIGENCE] Tick Pressure
+        self.tick_analyzer = tick_analyzer if tick_analyzer else TickPressureAnalyzer() # [HIGHEST INTELLIGENCE] Tick Pressure
 
         # [AI INTELLIGENCE] Initialize Policy & Governance
         self._telemetry = TelemetryWriter()

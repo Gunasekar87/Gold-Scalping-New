@@ -4,6 +4,7 @@ import numpy as np
 import logging
 import os
 from .nexus_transformer import TimeSeriesTransformer
+from .architect import Architect
 
 logger = logging.getLogger("Oracle")
 
@@ -12,10 +13,12 @@ class Oracle:
     The Oracle Engine: Uses Transformer models to predict future price movements.
     Wraps the institutional-grade TimeSeriesTransformer.
     """
-    def __init__(self, model_path="models/nexus_transformer.pth"):
+    def __init__(self, mt5_adapter=None, tick_analyzer=None, model_path="models/nexus_transformer.pth"):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = None
         self.model_path = model_path
+        self.architect = Architect(mt5_adapter) if mt5_adapter else None
+        self.tick_pressure = tick_analyzer
         self.load_model()
 
     def load_model(self):
@@ -71,6 +74,63 @@ class Oracle:
             rs = up / down if down != 0 else 0
             rsi[i] = 100. - 100. / (1. + rs)
         return rsi
+
+    async def get_sniper_signal_v2(self, symbol: str, candles: list) -> dict:
+        """
+        v5.5.0: THE ORACLE (AI + Reality + Structure)
+        Replaces legacy sniper logic with Reality Lock and Spatial Veto.
+        Returns: Dict with 'signal' (1, -1, 0), 'confidence', 'reason'
+        """
+        # 1. AI Prediction (The Brain)
+        ai_pred, ai_conf = self.predict(candles)
+        
+        ai_direction = 0
+        if ai_pred == "UP": ai_direction = 1
+        elif ai_pred == "DOWN": ai_direction = -1
+        
+        if ai_direction == 0:
+            return {'signal': 0, 'confidence': 0.0, 'reason': "AI Neutral"}
+
+        # 2. Real-Time Reality (The Eyes) - Reality Lock
+        pressure_val = 0.0
+        if self.tick_pressure:
+            metrics = self.tick_pressure.get_pressure_metrics()
+            # pressure_score is typically >15 or <-15 for strong moves
+            # dominance is BUY/SELL
+            pressure_val = metrics.get('pressure_score', 0.0)
+            
+            # REALITY LOCK:
+            # If AI says BUY, Pressure must NOT be strongly SELLING (<-15)
+            if ai_direction == 1 and pressure_val < -15.0:
+                logger.info(f"[ORACLE] BLOCKED BUY: AI says Up, but Pressure is Down ({pressure_val:.2f})")
+                return {'signal': 0, 'confidence': 0.0, 'reason': f"Reality Lock (Pressure {pressure_val:.1f})"}
+                
+            # If AI says SELL, Pressure must NOT be strongly BUYING (>15)
+            if ai_direction == -1 and pressure_val > 15.0:
+                logger.info(f"[ORACLE] BLOCKED SELL: AI says Down, but Pressure is Up ({pressure_val:.2f})")
+                return {'signal': 0, 'confidence': 0.0, 'reason': f"Reality Lock (Pressure {pressure_val:.1f})"}
+
+        # 3. Spatial Awareness (The Map) - Architect Veto
+        if self.architect:
+            structure = self.architect.get_market_structure(symbol)
+            if structure:
+                # RULE: Don't Buy if we are hitting the Ceiling
+                if ai_direction == 1 and structure['status'] == 'BLOCKED_UP':
+                    logger.info(f"[ARCHITECT] VETO BUY: Hitting H1 Resistance at {structure['resistance']:.2f} (Gap: {structure['room_up']:.2f})")
+                    return {'signal': 0, 'confidence': 0.0, 'reason': f"Blocked by Resistance ({structure['resistance']:.2f})"}
+
+                # RULE: Don't Sell if we are hitting the Floor
+                if ai_direction == -1 and structure['status'] == 'BLOCKED_DOWN':
+                    logger.info(f"[ARCHITECT] VETO SELL: Hitting H1 Support at {structure['support']:.2f} (Gap: {structure['room_down']:.2f})")
+                    return {'signal': 0, 'confidence': 0.0, 'reason': f"Blocked by Support ({structure['support']:.2f})"}
+
+        # 4. Final Decision
+        # If we passed all checks, we return the signal
+        return {
+            'signal': ai_direction, 
+            'confidence': ai_conf, 
+            'reason': f"Aligned: AI({ai_conf:.2f}) + Pressure({pressure_val:.1f})"
+        }
 
     def get_sniper_signal(self, prices: list, volumes: list) -> str:
         """
