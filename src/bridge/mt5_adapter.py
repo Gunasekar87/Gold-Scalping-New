@@ -370,6 +370,35 @@ class MT5Adapter(BrokerAdapter):
         tickets = [p.ticket if hasattr(p, 'ticket') else p['ticket'] for p in positions_data]
         return {ticket: result for ticket, result in zip(tickets, results)}
 
+    async def close_position(self, ticket: int) -> bool:
+        """
+        Close a single position by ticket.
+        Wrapper around close_positions for single ticket convenience.
+        """
+        # We need to find the position details first because close_positions needs volume/symbol
+        # Try to get from MT5 directly
+        positions = self.get_positions()
+        target_pos = None
+        if positions:
+            for p in positions:
+                if p.ticket == ticket:
+                    target_pos = p
+                    break
+        
+        if not target_pos:
+            logger.warning(f"Cannot close position {ticket}: Not found in broker")
+            return False
+            
+        # Reuse the bulk closer for consistency
+        result = await self.close_positions([target_pos])
+        
+        # Check result
+        if ticket in result:
+            res = result[ticket]
+            return res.get('retcode') == mt5.TRADE_RETCODE_DONE
+            
+        return False
+
     def is_trade_allowed(self) -> bool:
         info = mt5.terminal_info()
         return info.trade_allowed if info else False
