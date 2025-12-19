@@ -13,9 +13,11 @@ Version: 1.0.0
 """
 
 import time
+import os
 import logging
 import threading
 import math
+import MetaTrader5 as mt5
 from typing import Dict, List, Optional, Any, Tuple, Set, Callable
 from dataclasses import dataclass
 from enum import Enum
@@ -54,7 +56,6 @@ def retry_with_backoff(
         Tuple of (success: bool, result: Any)
     """
     delay = initial_delay
-    start_time = time.time()
     start_time = time.time()
     
     for attempt in range(1, max_attempts + 1):
@@ -126,6 +127,9 @@ class HedgeState:
     total_positions: int = 0
     zone_width_points: float = 0.0
     tp_width_points: float = 0.0
+    high_vol_mode: bool = False
+    volatility_scale: float = 1.0
+    last_volatility_scale_update: float = 0.0
     lock: threading.Lock = None
 
     def __post_init__(self):
@@ -315,8 +319,8 @@ class RiskManager:
 
     def execute_zone_recovery(self, broker, symbol: str, positions: List[Dict],
                             tick: Dict, point: float, shield, ppo_guardian,
-                            position_manager, nexus=None, oracle=None, atr_val: float = 0.0010,
-                            volatility_ratio: float = 1.0, rsi_value: float = 50.0) -> bool:
+                            position_manager, strict_entry: bool, nexus=None, oracle=None, atr_val: float = None,
+                            volatility_ratio: float = 1.0, rsi_value: float = None) -> bool:
         """
         Execute zone recovery hedging if conditions are met.
         
@@ -339,6 +343,51 @@ class RiskManager:
         Returns:
             True if hedge was executed
         """
+        if strict_entry and (rsi_value is None or atr_val is None or float(atr_val) <= 0):
+            logger.warning(f"[STRICT] Zone recovery blocked: missing ATR/RSI (atr={atr_val}, rsi={rsi_value})")
+            return False
+
+        # Freshness gate: block ANY NEW hedge if feed is stale
+        enable_freshness = str(os.getenv("AETHER_ENABLE_FRESHNESS_GATE", "1")).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        if enable_freshness:
+            try:
+                tick_age = float(tick.get('tick_age_s', float('inf')))
+            except Exception:
+                tick_age = float('inf')
+            try:
+                candle_close_age = float(tick.get('candle_close_age_s', float('inf')))
+            except Exception:
+                candle_close_age = float('inf')
+
+            try:
+                max_tick_age = float(os.getenv("AETHER_FRESH_TICK_MAX_AGE_S", os.getenv("AETHER_STRICT_TICK_MAX_AGE_S", "2.5")))
+            except Exception:
+                max_tick_age = 2.5
+
+            try:
+                max_candle_age = float(os.getenv("AETHER_FRESH_CANDLE_CLOSE_MAX_AGE_S", "0"))
+            except Exception:
+                max_candle_age = 0.0
+
+            if not max_candle_age or max_candle_age <= 0:
+                try:
+                    tf_s = float(tick.get('timeframe_s', 60) or 60)
+                except Exception:
+                    tf_s = 60.0
+                max_candle_age = max((2.0 * tf_s) + 10.0, 30.0)
+
+            if max_tick_age > 0 and tick_age > max_tick_age:
+                logger.warning(f"[FRESHNESS] Zone recovery blocked: stale tick age={tick_age:.2f}s max={max_tick_age:.2f}s")
+                return False
+            if max_candle_age > 0 and candle_close_age > max_candle_age:
+                logger.warning(f"[FRESHNESS] Zone recovery blocked: stale candle close age={candle_close_age:.2f}s max={max_candle_age:.2f}s")
+                return False
+
         # FAIL-SAFE: Verify broker connection before critical operations
         try:
             if not broker.is_trade_allowed():
@@ -364,8 +413,8 @@ class RiskManager:
                             current = float(parts[0].split('(')[1].replace('s', '').strip())
                             remaining = limit - current
                             remaining_msg = f" Resuming in {remaining:.1f}s"
-                        except:
-                            pass
+                        except Exception as e:
+                            logger.debug(f"[PAUSED] Failed parsing cooldown remaining time: {e}")
                     logger.info(f"[PAUSED] Zone Recovery Halted: {reason}.{remaining_msg}")
                     self._last_log_time = current_time
             else:
@@ -385,16 +434,17 @@ class RiskManager:
             # Access active_learning_trades via position_manager
             trade_metadata = position_manager.active_learning_trades.get(first_ticket, {})
             hedge_plan = trade_metadata.get('hedge_plan', {})
-            entry_atr = trade_metadata.get('entry_atr', 0.0010)
+            entry_atr = trade_metadata.get('entry_atr', None)
             
             # DYNAMIC PLAN UPDATE: Check if market volatility has shifted significantly (>50%)
             # If so, we must update the Virtual Targets to reflect new reality
-            current_atr = 0.0010 # Default
-            if ppo_guardian: # Try to get current ATR from PPO context if possible, or pass it in
-                 # In this scope we don't have direct access to current ATR easily without passing it
-                 # But we can infer it if we had it. For now, let's assume the plan is robust.
-                 # To implement the "loop" requested, we'd need to update the plan here.
-                 pass
+            if atr_val is not None and float(atr_val) > 0:
+                current_atr = float(atr_val)
+            elif entry_atr is not None and float(entry_atr) > 0:
+                current_atr = float(entry_atr)
+            else:
+                logger.warning(f"[ZONE] Skipping zone recovery: ATR unavailable for {symbol}")
+                return False
 
             # Determine which hedge level we're at (based on number of positions)
             hedge_level = len(positions)  # 1 = HEDGE1, 2 = HEDGE2, 3 = HEDGE3
@@ -425,21 +475,53 @@ class RiskManager:
             )
             
             # === DYNAMIC VOLATILITY SCALING ===
-            # If volatility is high (> 2x average), widen the zone to avoid rapid-fire hedging
-            if volatility_ratio > 2.0:
-                # Scale factor: 1.0 + (ratio - 2.0) * 0.5, capped at 3.0x
-                # Example: Ratio 6.0 -> 1.0 + 4.0*0.5 = 3.0x
-                scale_factor = min(1.0 + (volatility_ratio - 2.0) * 0.5, 3.0)
-                
-                # Apply scaling to zone width
+            # If volatility is high, widen the zone to avoid rapid-fire hedging.
+            # Stabilized with hysteresis + cached scaling to avoid oscillation near the threshold.
+            VOL_ENTER = 2.1
+            VOL_EXIT = 1.9
+            VOL_SCALE_STEP = 0.25
+            VOL_UPDATE_COOLDOWN_SECONDS = 30.0
+
+            entering_high_vol = False
+            with state.lock:
+                if not state.high_vol_mode and volatility_ratio >= VOL_ENTER:
+                    state.high_vol_mode = True
+                    entering_high_vol = True
+                elif state.high_vol_mode and volatility_ratio <= VOL_EXIT:
+                    state.high_vol_mode = False
+
+                if state.high_vol_mode:
+                    raw_scale = min(1.0 + (max(volatility_ratio, 2.0) - 2.0) * 0.5, 3.0)
+                    raw_scale = max(1.0, raw_scale)
+                    raw_scale = round(raw_scale / VOL_SCALE_STEP) * VOL_SCALE_STEP
+
+                    now = time.time()
+                    if (
+                        state.volatility_scale <= 1.0
+                        or abs(raw_scale - state.volatility_scale) >= VOL_SCALE_STEP
+                        or (now - state.last_volatility_scale_update) >= VOL_UPDATE_COOLDOWN_SECONDS
+                    ):
+                        state.volatility_scale = raw_scale
+                        state.last_volatility_scale_update = now
+                else:
+                    state.volatility_scale = 1.0
+
+                scale_factor = state.volatility_scale
+
+            if scale_factor > 1.0:
                 original_width = zone_width_points
                 zone_width_points *= scale_factor
-                
-                logger.warning(f"[VOLATILITY] High Volatility ({volatility_ratio:.1f}x)! Widening zone: {original_width/point:.1f} -> {zone_width_points/point:.1f} pips")
-                
-                # Disable stored plan if volatility is extreme, as the plan is likely obsolete
-                if use_stored_plan:
-                    logger.warning(f"[VOLATILITY] Overriding stored plan due to extreme volatility")
+
+                # Log only on entering high-vol mode to reduce noise.
+                if entering_high_vol:
+                    logger.warning(
+                        f"[VOLATILITY] High Volatility ({volatility_ratio:.1f}x). Zone scaling enabled: "
+                        f"{original_width/point:.1f} -> {zone_width_points/point:.1f} pips (x{scale_factor:.2f})"
+                    )
+
+                # Override stored plan only when high-vol mode starts (prevents flip-flopping).
+                if use_stored_plan and entering_high_vol:
+                    logger.warning("[VOLATILITY] Overriding stored plan due to high volatility")
                     use_stored_plan = False
 
             # Calculate zone boundaries (Dynamic)
@@ -648,20 +730,24 @@ class RiskManager:
                 # Get Oracle prediction if available
                 oracle_pred = "NEUTRAL"
                 if oracle:
-                    # Oracle returns "UP", "DOWN", "NEUTRAL"
-                    # We need to map this to "BUY", "SELL", "NEUTRAL" for calculate_defense
                     try:
-                        # Assuming we have history available or oracle can predict from internal state?
-                        # Actually, oracle.predict needs candles. 
-                        # But here we might not have candles easily available without fetching.
-                        # For now, we'll assume the oracle object passed might have a cached prediction 
-                        # or we skip it if we can't fetch candles efficiently here.
-                        # BETTER: The caller (TradingEngine) should pass the prediction string if possible.
-                        # BUT: We only have the oracle object.
-                        # Let's assume NEUTRAL for now to avoid blocking, or check if oracle has a 'last_prediction' property.
-                        pass
-                    except Exception:
-                        pass
+                        # Avoid fetching candles here; use cached/last-known prediction if present.
+                        raw = None
+                        if hasattr(oracle, "last_prediction"):
+                            raw = getattr(oracle, "last_prediction")
+                        elif hasattr(oracle, "last_signal"):
+                            raw = getattr(oracle, "last_signal")
+
+                        if raw is not None:
+                            raw_s = str(raw).strip().upper()
+                            if raw_s in ("UP", "BUY"):
+                                oracle_pred = "BUY"
+                            elif raw_s in ("DOWN", "SELL"):
+                                oracle_pred = "SELL"
+                            elif raw_s == "NEUTRAL":
+                                oracle_pred = "NEUTRAL"
+                    except Exception as e:
+                        logger.debug(f"[HEDGE] Oracle prediction unavailable: {e}")
                 
                 # Use calculate_defense with NET EXPOSURE
                 hedge_lot = shield.calculate_defense(
@@ -738,6 +824,10 @@ class RiskManager:
             # === ZERO LATENCY EXECUTION ===
             # Execute hedge immediately
             logger.info(f"[HEDGE] EXECUTING {next_action} {hedge_lot:.2f} lots NOW...")
+
+            atr_ok = bool(atr_val is not None and float(atr_val) > 0)
+            rsi_ok = bool(rsi_value is not None)
+            strict_ok = (not bool(strict_entry)) or (atr_ok and rsi_ok)
             
             result = broker.execute_order(
                 action="OPEN",
@@ -747,6 +837,12 @@ class RiskManager:
                 volume=hedge_lot,
                 sl=0.0,  # No broker SL - bucket managed by Python
                 tp=0.0,  # No broker TP - bucket needs calculated break-even
+                strict_entry=bool(strict_entry),
+                strict_ok=bool(strict_ok),
+                atr_ok=bool(atr_ok),
+                rsi_ok=bool(rsi_ok),
+                obi_ok=bool((tick or {}).get('obi_ok', False)) if isinstance(tick, dict) else None,
+                trace_reason="OPEN_ZONE_RECOVERY",
                 # MT5 comment limit: 31 chars
                 comment=f"HDG_Z{int(calc_zone_points)}"[:31]
             )
@@ -789,10 +885,13 @@ class RiskManager:
                                 magic=pos['ticket'],  # Position ticket to modify
                                 ticket=pos['ticket']  # Explicit ticket parameter
                             )
-                            if modify_result and modify_result.get('retcode') == 10009:  # TRADE_RETCODE_DONE
+                            if modify_result and modify_result.get('retcode') == mt5.TRADE_RETCODE_DONE:
                                 logger.info(f"[BUCKET] [OK] TP/SL removed from position #{pos['ticket']}")
                             else:
-                                logger.warning(f"[BUCKET] [WARN] Failed to remove TP/SL from position #{pos['ticket']}: retcode {modify_result.get('retcode', 'unknown')}")
+                                logger.warning(
+                                    f"[BUCKET] [WARN] Failed to remove TP/SL from position #{pos['ticket']}: "
+                                    f"retcode {modify_result.get('retcode', 'unknown')} comment {modify_result.get('comment', '')}"
+                                )
                         else:
                             logger.debug(f"[BUCKET] Position #{pos['ticket']} already has no TP/SL")
                     except Exception as e:
@@ -804,16 +903,28 @@ class RiskManager:
             if result and result.get('ticket'):
                 ticket = result['ticket']
 
+                # Convert drawdown to pips for PPO (drawdown_pips)
+                if "XAU" in symbol or "GOLD" in symbol or "JPY" in symbol:
+                    pip_multiplier = 100
+                else:
+                    pip_multiplier = 10000
+                try:
+                    drawdown_pips = abs(float(target_price) - float(first_pos['price_open'])) * float(pip_multiplier)
+                except Exception:
+                    drawdown_pips = 0.0
+
                 # Record for learning using thread-safe persistence
                 position_manager.record_trade_metadata(ticket, {
                     "symbol": symbol,
                     "type": next_action,
                     "entry_price": target_price,
-                    "obs": [abs(target_price - first_pos['price_open']) / point,  # drawdown
-                           0.0010,  # atr
-                           0.0,     # trend
-                           0.0],    # nexus
-                    "action": [1.0, 0.8],  # hedge_mult, zone_mod
+                          "obs": [
+                              float(drawdown_pips),  # drawdown_pips
+                              float(current_atr),    # ATR (price units)
+                              0.0,                   # trend_strength (not available here)
+                              0.0,                   # nexus/conf (not available here)
+                          ],
+                    "action": [1.0, 1.0],  # hedge_mult, zone_mod (unknown here; default neutral)
                     "open_time": time.time()
                 })
 

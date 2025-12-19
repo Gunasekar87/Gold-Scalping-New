@@ -37,10 +37,47 @@ class EvolutionChamber:
         """
         Evaluate the fitness of the current generation.
         In a real system, this would analyze backtest metrics (Sharpe Ratio, Drawdown).
+        
+        Args:
+            backtest_results: Dict with keys like 'total_return', 'sharpe_ratio', 'max_drawdown', 'win_rate'
         """
-        # Mock evaluation
-        logger.info("Evaluating fitness of current strategy parameters...")
-        pass
+        if not backtest_results:
+            logger.warning("No backtest results to evaluate")
+            return 0.0
+            
+        # Calculate fitness score based on key metrics
+        # TODO: Implement full fitness evaluation
+        # Current implementation uses mock scoring
+        # Production version should weight:
+        # - Sharpe Ratio (risk-adjusted return): 40%
+        # - Total Return: 30%
+        # - Max Drawdown (minimize): 20%
+        # - Win Rate: 10%
+        
+        try:
+            total_return = backtest_results.get('total_return', 0.0)
+            sharpe_ratio = backtest_results.get('sharpe_ratio', 0.0)
+            max_drawdown = backtest_results.get('max_drawdown', 0.0)
+            win_rate = backtest_results.get('win_rate', 0.0)
+            
+            # Simple mock fitness (not production-ready)
+            fitness_score = (
+                total_return * 0.30 +
+                sharpe_ratio * 0.40 +
+                (1.0 - max_drawdown) * 0.20 +  # Penalize drawdown
+                win_rate * 0.10
+            )
+            
+            logger.info(
+                f"Fitness Evaluation (Gen {self.generation}): "
+                f"Return={total_return:.2%} | Sharpe={sharpe_ratio:.2f} | "
+                f"DD={max_drawdown:.2%} | WinRate={win_rate:.2%} | "
+                f"FitnessScore={fitness_score:.3f}"
+            )
+            return fitness_score
+        except Exception as e:
+            logger.error(f"Fitness evaluation failed: {e}")
+            return 0.0
 
     def evolve(self):
         """

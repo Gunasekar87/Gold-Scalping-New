@@ -277,7 +277,11 @@ class IronShield:
             # Assuming this hedge is in the direction of the Oracle? 
             # We don't know the direction here, but usually a hedge is "with the immediate flow".
             # Let's assume neutral bias for safety unless explicitly passed.
-            pass
+            # TODO: Implement oracle bias weighting
+            # If oracle is bullish and hedge is long, increase profit target to 0.15
+            # If oracle is bearish and hedge is short, increase profit target to 0.15
+            # If oracle opposes hedge direction, decrease to 0.05 (conservative)
+            logger.debug(f"Oracle prediction: {oracle_prediction} (bias adjustment not yet implemented)")
 
         # 3. Survival Mode (Velvet Cushion)
         # If we are deep in hedges (Level 3+), we drop the profit requirement to 0 (Break-Even only).

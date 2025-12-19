@@ -42,8 +42,10 @@ try:
             def __call__(self, progress):
                 return self.value
         stable_baselines3.common.utils.ConstantSchedule = ConstantSchedule
-except (ImportError, AttributeError):
-    pass
+except (ImportError, AttributeError) as e:
+    logger = logging.getLogger("PPOGuardian")
+    logger.warning(f"SB3 compatibility patch failed (non-critical): {e}")
+    # Continue without patches - old models may show deserialization warnings but will still load
 
 logger = logging.getLogger("PPOGuardian")
 

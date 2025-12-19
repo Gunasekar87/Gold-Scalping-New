@@ -13,9 +13,11 @@ Version: 1.0.0
 """
 
 import time
+import os
 import logging
 import asyncio
 import math
+import MetaTrader5 as mt5
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass
 from enum import Enum
@@ -37,7 +39,14 @@ from src.config.settings import FLAGS, POLICY as _PTUNE, RISK as _RLIM
 from src.policy.hedge_policy import HedgePolicy, HedgeConfig
 from src.policy.risk_governor import RiskGovernor, RiskLimits
 from src.utils.telemetry import TelemetryWriter, DecisionRecord
-from src.features.market_features import spread_atr, zscore, simple_breakout_quality, simple_regime_trend
+from src.features.market_features import (
+    spread_atr,
+    zscore,
+    simple_breakout_quality,
+    simple_regime_trend,
+    simple_structure_break,
+    linear_regression_slope,
+)
 
 logger = logging.getLogger("TradingEngine")
 # [CRITICAL] Get the specific UI logger that run_bot.py listens to
@@ -142,11 +151,47 @@ class TradingEngine:
         # Status Tracking (For UI Feedback)
         self.last_pause_reason = None
 
+        # Strict entry gating (user-selected mode A: strict entries / soft exits)
+        self._strict_entry = str(os.getenv("AETHER_STRICT_ENTRY", "1")).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        self._strict_entry_min_candles = int(os.getenv("AETHER_STRICT_ENTRY_MIN_CANDLES", "60"))
+        self._strict_tick_max_age_s = float(os.getenv("AETHER_STRICT_TICK_MAX_AGE_S", "2.5"))
+
+        # Freshness gate for ANY NEW order (entry/hedge/recovery)
+        self._freshness_gate = str(os.getenv("AETHER_ENABLE_FRESHNESS_GATE", "1")).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        self._fresh_tick_max_age_s = float(
+            os.getenv("AETHER_FRESH_TICK_MAX_AGE_S", str(self._strict_tick_max_age_s))
+        )
+        # 0/negative = auto based on timeframe (2x TF + 10s)
+        self._fresh_candle_close_max_age_s = float(os.getenv("AETHER_FRESH_CANDLE_CLOSE_MAX_AGE_S", "0"))
+        self._freshness_trace = str(os.getenv("AETHER_FRESHNESS_TRACE", "0")).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        self._last_freshness_ok: Optional[bool] = None
+        self._last_freshness_trace_ts: float = 0.0
+
+        self._last_entry_gate_reason: Optional[str] = None
+        self._last_entry_gate_ts: float = 0.0
+
         # Decision tracking for smart logging (only log changes)
         self.decision_tracker = DecisionTracker()
         self._last_signal_logged = False  # Track if we just logged a signal
         self._last_position_status_time = 0.0  # Track last position status log time
-        self._last_cooldown_log_time = 0.0 # Track last cooldown log time
+
+        # Track last cooldown log time
+        self._last_cooldown_log_time = 0.0
 
         # Statistics
         self.session_stats = {
@@ -154,10 +199,155 @@ class TradingEngine:
             "trades_closed": 0,
             "total_profit": 0.0,
             "win_rate": 0.0,
-            "start_time": time.time()
+            "start_time": time.time(),
+            # Learning/optimization metrics
+            "equity_peak": None,
+            "max_drawdown_pct": 0.0,
         }
 
+        # End-of-session optimization metrics (profit + stability)
+        self._equity_peak: Optional[float] = None
+        self._max_drawdown_pct: float = 0.0
+        self._last_equity_check_ts: float = 0.0
+
         logger.info(f"TradingEngine initialized for {config.symbol}")
+
+    def _log_entry_gate(self, reason: str) -> None:
+        """Throttled log for strict entry gating (avoids spam)."""
+        now = time.time()
+        if reason != self._last_entry_gate_reason or (now - self._last_entry_gate_ts) > 10.0:
+            logger.info(f"[ENTRY_GATED] {reason}")
+            self._last_entry_gate_reason = reason
+            self._last_entry_gate_ts = now
+
+    def _get_fresh_candle_close_max_age_s(self) -> float:
+        """Auto candle-close freshness threshold based on configured timeframe."""
+        try:
+            configured = float(self._fresh_candle_close_max_age_s)
+        except Exception:
+            configured = 0.0
+
+        if configured and configured > 0:
+            return float(configured)
+
+        tf_s = 60.0
+        try:
+            tf_s = float(self.market_data.candles._timeframe_seconds())
+        except Exception:
+            tf_s = 60.0
+
+        # Default: allow up to ~2 bars behind + a small buffer
+        return float(max((2.0 * tf_s) + 10.0, 30.0))
+
+    def _freshness_ok_for_new_orders(self, tick: Dict) -> Tuple[bool, str]:
+        """Return (ok, reason) based on tick age and last completed candle close age."""
+        if not self._freshness_gate:
+            return True, "disabled"
+
+        now = time.time()
+
+        try:
+            tick_age = float(tick.get('tick_age_s', float('inf')))
+            if tick_age == float('inf'):
+                tick_ts = float(tick.get('time', 0.0) or 0.0)
+                tick_age = abs(now - tick_ts) if tick_ts > 0 else float('inf')
+        except Exception:
+            tick_age = float('inf')
+
+        try:
+            candle_close_age = float(tick.get('candle_close_age_s', float('inf')))
+        except Exception:
+            candle_close_age = float('inf')
+
+        max_tick = float(self._fresh_tick_max_age_s) if self._fresh_tick_max_age_s else 0.0
+        max_candle = self._get_fresh_candle_close_max_age_s()
+
+        if max_tick > 0 and tick_age > max_tick:
+            return False, f"stale_tick age={tick_age:.2f}s max={max_tick:.2f}s"
+        if max_candle > 0 and candle_close_age > max_candle:
+            return False, f"stale_candle_close age={candle_close_age:.2f}s max={max_candle:.2f}s"
+
+        return True, f"ok tick_age={tick_age:.2f}s candle_close_age={candle_close_age:.2f}s"
+
+    def _maybe_log_freshness_trace(self, tick: Dict) -> None:
+        """Optional freshness telemetry for live verification (throttled).
+
+        Logs only when freshness state changes (ok<->blocked) or every ~30s.
+        """
+        if not self._freshness_trace:
+            return
+
+        ok, reason = self._freshness_ok_for_new_orders(tick)
+        now = time.time()
+
+        should_log = False
+        if self._last_freshness_ok is None or bool(ok) != bool(self._last_freshness_ok):
+            should_log = True
+        elif (now - float(self._last_freshness_trace_ts)) > 30.0:
+            should_log = True
+
+        if not should_log:
+            return
+
+        try:
+            tick_age = float(tick.get('tick_age_s', float('inf')))
+        except Exception:
+            tick_age = float('inf')
+        try:
+            candle_age = float(tick.get('candle_close_age_s', float('inf')))
+        except Exception:
+            candle_age = float('inf')
+
+        max_tick = float(self._fresh_tick_max_age_s) if self._fresh_tick_max_age_s else 0.0
+        max_candle = self._get_fresh_candle_close_max_age_s()
+
+        logger.info(
+            f"[FRESHNESS_TRACE] ok={bool(ok)} reason={reason} "
+            f"tick_age_s={tick_age:.2f} max_tick_s={max_tick:.2f} "
+            f"candle_close_age_s={candle_age:.2f} max_candle_s={max_candle:.2f}"
+        )
+
+        self._last_freshness_ok = bool(ok)
+        self._last_freshness_trace_ts = now
+
+    def _update_equity_metrics_throttled(self) -> None:
+        """Track equity peak and max drawdown, throttled for HFT loop safety."""
+        now = time.time()
+        # Default: check once every 2 seconds to avoid broker/API spam.
+        try:
+            every_s = float(os.getenv("AETHER_EQUITY_TRACK_EVERY_S", "2.0"))
+        except Exception:
+            every_s = 2.0
+
+        if every_s <= 0:
+            every_s = 2.0
+
+        if (now - self._last_equity_check_ts) < every_s:
+            return
+        self._last_equity_check_ts = now
+
+        try:
+            acct = self.broker.get_account_info() if self.broker else None
+            if not acct:
+                return
+            equity = float(acct.get('equity', 0.0) or 0.0)
+            if equity <= 0:
+                return
+
+            if self._equity_peak is None or equity > float(self._equity_peak):
+                self._equity_peak = float(equity)
+
+            peak = float(self._equity_peak) if self._equity_peak else float(equity)
+            if peak > 0:
+                dd_pct = max(0.0, (peak - equity) / peak)
+                if dd_pct > self._max_drawdown_pct:
+                    self._max_drawdown_pct = float(dd_pct)
+
+            # Expose for dashboards / end-of-session tuning
+            self.session_stats["equity_peak"] = float(self._equity_peak) if self._equity_peak is not None else None
+            self.session_stats["max_drawdown_pct"] = float(self._max_drawdown_pct)
+        except Exception:
+            return
 
     async def initialize_database(self) -> None:
         """Initialize async database components."""
@@ -243,40 +433,41 @@ class TradingEngine:
 
             # Apply strategist risk multiplier
             risk_mult = strategist.get_risk_multiplier()
-            
-            # --- DYNAMIC LOT SIZING (Layer 8) ---
-            # Scale based on Account Balance & Confidence
-            # 1. Balance Scaling: 0.01 lots per $1000 equity (Conservative)
-            equity = account_info.get('equity', 1000)
-            balance_scale = max(1.0, equity / 1000.0)
-            
-            # 2. Confidence Scaling: 
-            # If Confidence > 0.8 -> 1.2x size
-            # If Confidence < 0.5 -> 0.8x size
-            conf_scale = 1.0
-            if signal.confidence > 0.8:
-                conf_scale = 1.2
-            elif signal.confidence < 0.5:
-                conf_scale = 0.8
-                
-            # 3. Trend Closing Confidence (Win Rate)
-            # If recent win rate is high (>60%), increase size slightly
-            # If recent win rate is low (<40%), decrease size
+
+            # IMPORTANT:
+            # IronShield.calculate_entry_lot() already applies equity/confidence/ATR/trend scaling.
+            # Re-applying balance/conf scalers here causes quadratic growth in size (high-risk).
+            # If you want the legacy extra scalers, enable AETHER_ENGINE_EXTRA_SCALING=1.
+            enable_extra_scaling = str(os.getenv("AETHER_ENGINE_EXTRA_SCALING", "0")).strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+
             win_rate_scale = 1.0
             if hasattr(strategist, 'recent_win_rate'):
-                 if strategist.recent_win_rate > 0.6:
-                     win_rate_scale = 1.1
-                 elif strategist.recent_win_rate < 0.4:
-                     win_rate_scale = 0.8
+                try:
+                    if strategist.recent_win_rate > 0.6:
+                        win_rate_scale = 1.1
+                    elif strategist.recent_win_rate < 0.4:
+                        win_rate_scale = 0.8
+                except Exception:
+                    win_rate_scale = 1.0
 
-            # Apply all scalings to raw_lot (which is usually fixed 0.01)
-            # If raw_lot is fixed 0.01, we scale it up.
-            # If raw_lot is already dynamic from Shield, we just refine it.
-            
-            # Let's assume raw_lot is the "Base Lot" from config (e.g. 0.01)
-            # New Lot = Base * BalanceScale * ConfScale * WinRateScale * RiskMult
-            
-            dynamic_lot = raw_lot * balance_scale * conf_scale * win_rate_scale * risk_mult
+            if enable_extra_scaling:
+                equity = account_info.get('equity', 1000)
+                balance_scale = max(1.0, equity / 1000.0)
+
+                conf_scale = 1.0
+                if signal.confidence > 0.8:
+                    conf_scale = 1.2
+                elif signal.confidence < 0.5:
+                    conf_scale = 0.8
+
+                dynamic_lot = raw_lot * balance_scale * conf_scale * win_rate_scale * risk_mult
+            else:
+                dynamic_lot = raw_lot * win_rate_scale * risk_mult
             
             # NEW: Apply PPO Guardian AI optimization
             ppo_mult = 1.0  # Default if PPO not available
@@ -314,10 +505,14 @@ class TradingEngine:
             reason_parts = [
                 f"Lot: {entry_lot}",
                 f"Base: {raw_lot:.2f}",
-                f"BalScale: {balance_scale:.1f}",
-                f"ConfScale: {conf_scale:.1f}",
                 f"WinScale: {win_rate_scale:.1f}"
             ]
+
+            if enable_extra_scaling:
+                reason_parts.extend([
+                    f"BalScale: {balance_scale:.1f}",
+                    f"ConfScale: {conf_scale:.1f}",
+                ])
             
             if ppo_guardian and ppo_mult != 1.0:
                 reason_parts.append(f"ppo_mult: {ppo_mult:.2f}")
@@ -325,7 +520,7 @@ class TradingEngine:
             return entry_lot, " | ".join(reason_parts)
 
         except Exception as e:
-            logger.error(f"Error calculating position size: {e}")
+            logger.exception(f"Error calculating position size: {e}")
             return 0.0, f"Calculation error: {e}"
 
     def validate_trade_entry(self, signal: TradeSignal, lot_size: float,
@@ -382,12 +577,18 @@ class TradingEngine:
         # --- HFT LAYER 7: ORDER BOOK IMBALANCE (OBI) FILTER ---
         # If OBI is strongly against us, block the trade.
         # OBI > 0.3 means Strong Buy Pressure. OBI < -0.3 means Strong Sell Pressure.
-        obi = tick.get('obi', 0.0)
-        if abs(obi) > 0.3: # Only filter if there is significant imbalance
-            if signal.action == TradeAction.BUY and obi < -0.3:
-                return False, f"HFT Block: Strong Sell Pressure (OBI: {obi:.2f})"
-            if signal.action == TradeAction.SELL and obi > 0.3:
-                return False, f"HFT Block: Strong Buy Pressure (OBI: {obi:.2f})"
+        obi_applicable = bool(tick.get('obi_applicable', False))
+        obi_ok = bool(tick.get('obi_ok', False))
+        if self._strict_entry and obi_applicable and not obi_ok:
+            return False, "OBI unavailable (strict entry)"
+
+        if obi_ok:
+            obi = float(tick.get('obi', 0.0) or 0.0)
+            if abs(obi) > 0.3:  # Only filter if there is significant imbalance
+                if signal.action == TradeAction.BUY and obi < -0.3:
+                    return False, f"HFT Block: Strong Sell Pressure (OBI: {obi:.2f})"
+                if signal.action == TradeAction.SELL and obi > 0.3:
+                    return False, f"HFT Block: Strong Buy Pressure (OBI: {obi:.2f})"
 
         return True, "Trade entry validated"
 
@@ -407,6 +608,8 @@ class TradingEngine:
             Order result dict or None if failed
         """
         try:
+            strict_entry = bool(self._strict_entry)
+
             # Extract signal metadata for logging and logic
             nexus_conf = signal.metadata.get('nexus_signal_confidence', 0.0)
             trend_strength = signal.metadata.get('trend_strength', 0.0)
@@ -425,7 +628,57 @@ class TradingEngine:
 
             # Get dynamic TP parameters - USE ACTUAL ATR
             symbol = signal.symbol
-            atr_value = self.market_data.calculate_atr(symbol, 14) if hasattr(self.market_data, 'calculate_atr') else 0.0010
+            atr_value = 0.0
+            try:
+                atr_value = float(signal.metadata.get('atr', 0.0) or 0.0)
+            except Exception:
+                atr_value = 0.0
+
+            if atr_value <= 0.0:
+                if strict_entry and hasattr(self.market_data, 'calculate_atr_checked'):
+                    atr_checked, ok, areason = self.market_data.calculate_atr_checked(symbol, 14)
+                    if not ok or atr_checked is None:
+                        logger.warning(f"[STRICT] Blocking entry: ATR unavailable ({areason})")
+                        return None
+                    atr_value = float(atr_checked)
+                else:
+                    atr_value = self.market_data.calculate_atr(symbol, 14) if hasattr(self.market_data, 'calculate_atr') else 0.0010
+
+            rsi_value = None
+            try:
+                rsi_value = signal.metadata.get('rsi', None) if hasattr(signal, 'metadata') else None
+            except Exception:
+                rsi_value = None
+            if rsi_value is None and strict_entry and hasattr(self.market_data, 'calculate_rsi_checked'):
+                rsi_checked, ok, rreason = self.market_data.calculate_rsi_checked(symbol, 14)
+                if not ok or rsi_checked is None:
+                    logger.warning(f"[STRICT] Blocking entry: RSI unavailable ({rreason})")
+                    return None
+                rsi_value = float(rsi_checked)
+                try:
+                    signal.metadata['rsi'] = rsi_value
+                except Exception:
+                    pass
+
+            obi_applicable = bool(tick.get('obi_applicable', False))
+            obi_ok = bool(tick.get('obi_ok', False))
+            if hasattr(signal, 'metadata'):
+                try:
+                    obi_ok = bool(signal.metadata.get('obi_ok', obi_ok))
+                except Exception:
+                    pass
+            if strict_entry and obi_applicable and not obi_ok:
+                logger.warning("[STRICT] Blocking entry: OBI unavailable (applicable but not ok)")
+                return None
+
+            atr_ok = bool(atr_value is not None and float(atr_value) > 0.0)
+            rsi_ok = bool(rsi_value is not None)
+            strict_ok = (not strict_entry) or (atr_ok and rsi_ok and ((not obi_applicable) or obi_ok))
+            if strict_entry and not strict_ok:
+                logger.warning(
+                    f"[STRICT] Blocking entry: strict_ok=False (atr_ok={atr_ok} rsi_ok={rsi_ok} obi_applicable={obi_applicable} obi_ok={obi_ok})"
+                )
+                return None
             
             # Convert ATR to points based on symbol type
             if 'JPY' in symbol or 'XAU' in symbol:
@@ -485,6 +738,12 @@ class TradingEngine:
                 volume=lot_size,
                 sl=0.0,  # NO SL - hedging strategy manages risk
                 tp=0.0,  # NO BROKER TP - Virtual TP managed by Python for nil latency
+                strict_entry=bool(strict_entry),
+                strict_ok=bool(strict_ok),
+                atr_ok=bool(atr_ok),
+                rsi_ok=bool(rsi_ok),
+                obi_ok=bool(obi_ok) if obi_applicable else None,
+                trace_reason=f"OPEN_ENTRY:{signal.reason[:24]}",
                 # MT5 comment limit: 31 chars
                 comment=f"{signal.reason[:20]}"
             )
@@ -520,8 +779,13 @@ class TradingEngine:
                     "symbol": signal.symbol,
                     "type": order_type,
                     "entry_price": entry_price,
-                    "obs": [0.0, tp_points, 0.0, signal.metadata.get("nexus_signal_confidence", 0.0)],
-                    "action": [1.0, 0.8],  # Default hedge mult and zone mod
+                    "obs": [
+                        0.0,  # drawdown_pips at entry
+                        float(atr_value) if atr_value is not None else 0.0,  # ATR (price units)
+                        float(trend_strength) if trend_strength is not None else 0.0,  # trend strength
+                        float(signal.metadata.get("nexus_signal_confidence", 0.0) or 0.0),  # nexus/conf
+                    ],
+                    "action": [1.0, float(zone_mod)],  # hedge_mult, zone_mod (zone_mod may be PPO-derived)
                     "open_time": time.time(),
                     # Store entry targets for Python-side monitoring
                     "entry_tp_pips": tp_pips_entry,
@@ -532,13 +796,7 @@ class TradingEngine:
                 # === ENHANCED AI INTELLIGENCE TRADING PLAN LOGGING ===
                 # Comprehensive AI decision factors and execution intelligence
                 symbol = signal.symbol
-                atr_value = self.market_data.calculate_atr(symbol, 14) if hasattr(self.market_data, 'calculate_atr') else 0.0010
-                
-                # [PHASE 3] Get Regime from Supervisor
-                regime_name = "UNKNOWN"
-                if hasattr(self, 'supervisor'):
-                    regime = self.supervisor.detect_regime(self.market_data.get_tick_data(symbol))
-                    regime_name = regime.name
+                # Reuse ATR/regime already computed for this entry.
                 
                 # Convert ATR to pips based on symbol type
                 if "JPY" in symbol or "XAU" in symbol:
@@ -572,11 +830,10 @@ class TradingEngine:
                 zone_pips = atr_pips * ScalpingConfig.HEDGE1_ATR_MULTIPLIER * zone_mod
                 zone_price_dist = zone_pips / pip_divisor
                 
-                # Get Spread for Lot Calculation (Estimate)
-                current_tick = self.market_data.get_tick_data(symbol)
-                spread_points = 20 # Default 2 pips
-                if current_tick and 'ask' in current_tick and 'bid' in current_tick:
-                    spread_points = (current_tick['ask'] - current_tick['bid']) / point_approx
+                # Get Spread for Lot Calculation (Use the live tick that triggered this entry)
+                props = self._get_symbol_properties(symbol)
+                point_size = float(props.get('point_size', point_approx) or point_approx)
+                spread_points = float((tick['ask'] - tick['bid']) / max(1e-12, point_size))
                 
                 # Calculate Lots using IronShield (Same as Execution)
                 # Convert pips to points for IronShield
@@ -851,20 +1108,71 @@ class TradingEngine:
         # Prepare market data for intelligent scalping analysis (MOVED UP)
         atr_value = self.market_data.calculate_atr(symbol, 14)
         trend_strength = self.market_data.calculate_trend_strength(symbol, 20)
-        
+        trend_direction = 0.0
+        rsi_val = rsi_value
+
+        atr_ok = True
+        trend_ok = True
+        trend_dir_ok = True
+        rsi_ok = True
+
+        if self._strict_entry:
+            # For any logic that can open NEW orders (DCA/calculated recovery/zone recovery),
+            # ensure indicators are computed from real candles.
+            if hasattr(self.market_data, 'calculate_atr_checked'):
+                a, ok, _ = self.market_data.calculate_atr_checked(symbol, 14)
+                atr_ok = bool(ok and a is not None)
+                if atr_ok:
+                    atr_value = float(a)
+            if hasattr(self.market_data, 'calculate_trend_strength_checked'):
+                t, ok, _ = self.market_data.calculate_trend_strength_checked(symbol, 20)
+                trend_ok = bool(ok and t is not None)
+                if trend_ok:
+                    trend_strength = float(t)
+            if hasattr(self.market_data, 'calculate_trend_direction_checked'):
+                td, ok, _ = self.market_data.calculate_trend_direction_checked(symbol, 20)
+                trend_dir_ok = bool(ok and td is not None)
+                if trend_dir_ok:
+                    trend_direction = float(td)
+            if hasattr(self.market_data, 'calculate_rsi_checked'):
+                r, ok, _ = self.market_data.calculate_rsi_checked(symbol, 14)
+                rsi_ok = bool(ok and r is not None)
+                if rsi_ok:
+                    rsi_val = float(r)
+        else:
+            if hasattr(self.market_data, 'calculate_trend_direction'):
+                try:
+                    trend_direction = float(self.market_data.calculate_trend_direction(symbol))
+                except Exception:
+                    trend_direction = 0.0
+
         # [GOD MODE] Fetch candles for Structure Analysis
         candles = self.market_data.candles.get_history(symbol)
+
+        ok_fresh, fresh_reason = self._freshness_ok_for_new_orders(tick)
         
         market_data = {
             'atr': atr_value,  # ATR in points
             'spread': abs(tick['ask'] - tick['bid']),  # Spread in points
             'trend_strength': trend_strength,  # Trend strength 0-1
+            'trend_direction': trend_direction,  # Signed trend direction (-1..+1)
             'current_price': (tick['ask'] + tick['bid']) / 2,
             'bid': tick['bid'], # Explicit Bid
             'ask': tick['ask'], # Explicit Ask
+            'time': tick.get('time', 0.0),
+            'tick_age_s': float(tick.get('tick_age_s', float('inf'))),
+            'candle_close_age_s': float(tick.get('candle_close_age_s', float('inf'))),
+            'timeframe_s': int(tick.get('timeframe_s', 60) or 60),
+            'fresh_ok': bool(ok_fresh),
+            'fresh_reason': str(fresh_reason),
             'point': point,  # Point value for pip calculations
             'candles': candles, # Pass full history for structure analysis
-            'rsi': rsi_value # Add RSI here
+            'rsi': rsi_val, # Add RSI here
+            'strict_entry': bool(self._strict_entry),
+            'atr_ok': bool(atr_ok),
+            'trend_ok': bool(trend_ok),
+            'trend_dir_ok': bool(trend_dir_ok),
+            'rsi_ok': bool(rsi_ok),
         }
         
         ai_context = {
@@ -877,17 +1185,10 @@ class TradingEngine:
              # Prepare market data history for Oracle
              history = self.market_data.candles.get_history(symbol)
              # Ensure we have enough history
-             if len(history) >= 30:
-                 volumes = [c.get('volume', 0) for c in history]
-                 prices = [c.get('close', 0) for c in history]
-                 
-                 sniper_data = {
-                     'prices': prices,
-                     'volumes': volumes
-                 }
-                 
+             if len(history) >= 60: # Increased to 60 for Transformer
+                 # Pass full history (candles) to PositionManager for v5.5.0 Oracle Logic
                  unwound = await self.position_manager.execute_ai_sniper_logic(
-                     bucket_id, oracle, self.broker, sniper_data
+                     bucket_id, oracle, self.broker, history, symbol
                  )
                  if unwound:
                      logger.info(f"[SNIPER] Smart Unwind executed for {bucket_id}")
@@ -939,8 +1240,8 @@ class TradingEngine:
                         lots = hedge_plan.get(f"{next_hedge_key}_lots")
                         if trigger_price:
                              next_hedge_info = {'price': trigger_price, 'lots': lots, 'type': 'PENDING'}
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"[STATUS] Failed reading stored TP/hedge plan metadata: {e}", exc_info=True)
             
             # Calculate current P&L in pips
             if first_pos.get('type') == 0:  # BUY
@@ -975,8 +1276,21 @@ class TradingEngine:
             slippage_buffer = max(0.50, total_vol * 10.0)
             
             if net_profit > slippage_buffer: 
-                logger.info(f"🚀 [PLAN B] Reversion Escape Successful! Net Profit: ${net_profit:.2f} (Buffer: ${slippage_buffer:.2f}). Closing all positions.")
-                bucket_closed = await self.position_manager.close_bucket_positions(self.broker, bucket_id, symbol)
+                logger.info(f"[PLAN B] Reversion Escape Successful! Net Profit: ${net_profit:.2f} (Buffer: ${slippage_buffer:.2f}). Closing all positions.")
+                bucket_closed = await self.position_manager.close_bucket_positions(
+                    self.broker,
+                    bucket_id,
+                    symbol,
+                    trace={
+                        'strict_entry': bool(self._strict_entry),
+                        'strict_ok': True,
+                        'atr_ok': bool(market_data.get('atr_ok', True)),
+                        'rsi_ok': bool(market_data.get('rsi_ok', True)),
+                        'obi_ok': bool(market_data.get('obi_ok', False)),
+                        'reason': 'PLAN_B_REVERSION_ESCAPE',
+                    },
+                    ppo_guardian=ppo_guardian,
+                )
                 if bucket_closed:
                     setattr(self, f"_plan_b_active_{symbol}", False)
                     setattr(self, f"_plan_b_veto_{symbol}", False)
@@ -991,7 +1305,18 @@ class TradingEngine:
         if should_close:
             logger.info(f"[BUCKET] EXIT TRIGGERED: Confidence {confidence:.3f} - Closing all positions")
             bucket_closed = await self.position_manager.close_bucket_positions(
-                self.broker, bucket_id, symbol
+                self.broker,
+                bucket_id,
+                symbol,
+                trace={
+                    'strict_entry': bool(self._strict_entry),
+                    'strict_ok': True,
+                    'atr_ok': bool(market_data.get('atr_ok', True)),
+                    'rsi_ok': bool(market_data.get('rsi_ok', True)),
+                    'obi_ok': bool(market_data.get('obi_ok', False)),
+                    'reason': 'TP_EXIT',
+                },
+                ppo_guardian=ppo_guardian,
             )
             if bucket_closed:
                 logger.info(f"[BUCKET] CLOSED SUCCESSFULLY: {bucket_id}")
@@ -1002,6 +1327,13 @@ class TradingEngine:
 
         # If bucket not closed, check for zone recovery (only log if executed)
         if not bucket_closed:
+            # Freshness gate: allow exits, but block ANY NEW order when feed is stale
+            if self._freshness_gate:
+                ok_fresh, fresh_reason = self._freshness_ok_for_new_orders(tick)
+                if not ok_fresh:
+                    logger.warning(f"[FRESHNESS] NEW orders blocked (recovery/hedge): {fresh_reason}")
+                    return bucket_closed
+
             # [PHASE 2] THE STABILIZER: Check for Hedging Trigger
             # If Drawdown > 1.5 * ATR, trigger hedge immediately
             stabilizer_triggered = self.position_manager.check_stabilizer_trigger(bucket_id, market_data)
@@ -1052,7 +1384,20 @@ class TradingEngine:
                 point_value = 0.0001  # Standard forex: 1 pip = 0.0001
             
             # Calculate current ATR for dynamic zone sizing
-            atr_value = self.market_data.calculate_atr(symbol, 14) if hasattr(self.market_data, 'calculate_atr') else 0.0010
+            atr_value = None
+            if hasattr(self.market_data, 'calculate_atr_checked'):
+                atr_v, ok, areason = self.market_data.calculate_atr_checked(symbol, 14)
+                if ok and atr_v is not None:
+                    atr_value = atr_v
+                else:
+                    logger.warning(f"[ZONE_CHECK] Skipping zone recovery: ATR unavailable ({areason})")
+                    return bucket_closed
+            else:
+                atr_value = self.market_data.calculate_atr(symbol, 14) if hasattr(self.market_data, 'calculate_atr') else 0.0010
+
+            if self._strict_entry and (rsi_value is None):
+                logger.warning("[STRICT] Skipping zone recovery: RSI unavailable")
+                return bucket_closed
             
             # Get volatility ratio
             volatility_ratio = self.market_data.get_volatility_ratio() if hasattr(self.market_data, 'get_volatility_ratio') else 1.0
@@ -1060,7 +1405,7 @@ class TradingEngine:
             logger.info(f"[ZONE_CHECK] Calling execute_zone_recovery for {symbol} with {len(positions_dict)} positions | ATR: {atr_value:.5f} | VolRatio: {volatility_ratio:.2f}")
             zone_recovery_executed = self.risk_manager.execute_zone_recovery(
                 self.broker, symbol, positions_dict, tick, point_value,
-                shield, ppo_guardian, self.position_manager, nexus, oracle=oracle, atr_val=atr_value,
+                shield, ppo_guardian, self.position_manager, bool(self._strict_entry), nexus, oracle=oracle, atr_val=atr_value,
                 volatility_ratio=volatility_ratio, rsi_value=rsi_value
             )
             if zone_recovery_executed:
@@ -1098,8 +1443,17 @@ class TradingEngine:
     async def _check_global_safety(self):
         """
         [DOOMSDAY PROTOCOL] Global Equity Stop Loss.
-        If Drawdown > 20%, CLOSE EVERYTHING immediately.
+        If Drawdown > 75%, CLOSE EVERYTHING immediately.
         """
+        enable_doomsday = str(os.getenv("AETHER_ENABLE_DOOMSDAY", "0")).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        if not enable_doomsday:
+            return
+
         if getattr(self, '_safety_lock', False):
             return # Already locked
 
@@ -1114,8 +1468,13 @@ class TradingEngine:
 
         drawdown_pct = (balance - equity) / balance
         
-        # HARDCODED SAFETY LIMIT: 20%
-        if drawdown_pct > 0.20:
+        # Safety limit (defaults to 75%, override via env)
+        try:
+            limit = float(os.getenv("AETHER_DOOMSDAY_DRAWDOWN_PCT", "0.75"))
+        except Exception:
+            limit = 0.75
+
+        if drawdown_pct > limit:
             logger.critical(f"[DOOMSDAY] GLOBAL EQUITY STOP TRIGGERED! Drawdown: {drawdown_pct*100:.1f}%")
             print(f">>> [CRITICAL] DOOMSDAY PROTOCOL ACTIVATED. CLOSING ALL TRADES.", flush=True)
             
@@ -1124,10 +1483,48 @@ class TradingEngine:
             # Close all positions
             positions = self.broker.get_positions()
             if positions:
-                for pos in positions:
-                    ticket = pos.get('ticket') if isinstance(pos, dict) else pos.ticket
-                    await self.broker.close_position(ticket)
-                    logger.critical(f"[DOOMSDAY] Closed ticket {ticket}")
+                if hasattr(self.broker, 'close_positions'):
+                    try:
+                        close_results = await self.broker.close_positions(
+                            positions,
+                            trace={
+                                'strict_entry': bool(self._strict_entry),
+                                'strict_ok': True,
+                                'atr_ok': None,
+                                'rsi_ok': None,
+                                'obi_ok': None,
+                                'reason': 'DOOMSDAY_GLOBAL_EQUITY_STOP',
+                            },
+                        )
+                    except TypeError:
+                        close_results = await self.broker.close_positions(positions)
+                    try:
+                        for ticket, res in (close_results or {}).items():
+                            r = res or {}
+                            ok = r.get('retcode') == mt5.TRADE_RETCODE_DONE
+                            logger.critical(
+                                f"[DOOMSDAY] Close ticket={ticket} ok={ok} retcode={r.get('retcode')} comment={r.get('comment', '')}"
+                            )
+                    except Exception:
+                        logger.critical("[DOOMSDAY] Close batch completed (result parse failed)")
+                else:
+                    for pos in positions:
+                        ticket = pos.get('ticket') if isinstance(pos, dict) else pos.ticket
+                        try:
+                            await self.broker.close_position(
+                                ticket,
+                                trace={
+                                    'strict_entry': bool(self._strict_entry),
+                                    'strict_ok': True,
+                                    'atr_ok': None,
+                                    'rsi_ok': None,
+                                    'obi_ok': None,
+                                    'reason': 'DOOMSDAY_GLOBAL_EQUITY_STOP',
+                                },
+                            )
+                        except TypeError:
+                            await self.broker.close_position(ticket)
+                        logger.critical(f"[DOOMSDAY] Closed ticket {ticket}")
             
             # Raise flag to stop bot
             raise Exception("Global Equity Stop Loss Triggered")
@@ -1150,12 +1547,18 @@ class TradingEngine:
             # [SAFETY FIRST] Check Global Equity Stop
             await self._check_global_safety()
 
+            # Maintain end-of-session risk metrics (profit vs drawdown)
+            self._update_equity_metrics_throttled()
+
             # Get market data
             # print(f">>> [DEBUG] Fetching tick for {symbol}...", flush=True)
             tick = self.market_data.get_tick_data(symbol)
             if not tick:
                 print(f">>> [DEBUG] No tick data for {symbol} (Check MT5 Connection/Market Watch)", flush=True)
                 return
+
+            # Optional telemetry: prove tick/candle freshness live (throttled)
+            self._maybe_log_freshness_trace(tick)
 
             # [HIGHEST INTELLIGENCE] Update Tick Pressure Analyzer
             self.tick_analyzer.add_tick(tick)
@@ -1212,6 +1615,66 @@ class TradingEngine:
             # HUNTING MODE
             # Proceed to AI analysis for new entries
 
+            # [STRICT ENTRIES] Require real, sufficient, fresh inputs before opening new positions.
+            macro_context = self.market_data.get_macro_context()
+            atr_value, trend_strength = self._calculate_indicators(symbol)
+            rsi_value = self.market_data.calculate_rsi(symbol)
+
+            # Freshness gate applies to any NEW entry attempt (even if strict mode is off)
+            if self._freshness_gate:
+                ok, freason = self._freshness_ok_for_new_orders(tick)
+                if not ok:
+                    self._log_entry_gate(f"Freshness gate: {freason}")
+                    return
+
+            if self._strict_entry:
+                # Candle sufficiency check (prevents ATR/RSI/trend falling back to neutral defaults)
+                history = self.market_data.candles.get_history(symbol)
+                if not history or len(history) < self._strict_entry_min_candles:
+                    self._log_entry_gate(
+                        f"Insufficient candles: have={len(history) if history else 0} need={self._strict_entry_min_candles}"
+                    )
+                    return
+
+                # Indicators must be computed from real candle history (no neutral fallbacks)
+                try:
+                    if hasattr(self.market_data, 'calculate_atr_checked'):
+                        atr_v, ok, areason = self.market_data.calculate_atr_checked(symbol, 14)
+                        if not ok or atr_v is None:
+                            self._log_entry_gate(f"ATR unavailable: {areason}")
+                            return
+                        atr_value = atr_v
+
+                    if hasattr(self.market_data, 'calculate_trend_strength_checked'):
+                        ts_v, ok, treason = self.market_data.calculate_trend_strength_checked(symbol, 20)
+                        if not ok or ts_v is None:
+                            self._log_entry_gate(f"Trend unavailable: {treason}")
+                            return
+                        trend_strength = ts_v
+
+                    if hasattr(self.market_data, 'calculate_rsi_checked'):
+                        rsi_v, ok, rreason = self.market_data.calculate_rsi_checked(symbol, 14)
+                        if not ok or rsi_v is None:
+                            self._log_entry_gate(f"RSI unavailable: {rreason}")
+                            return
+                        rsi_value = rsi_v
+                except Exception as e:
+                    self._log_entry_gate(f"Indicator check error: {e}")
+                    return
+
+                # Macro proxies: if correlations are enabled, require proxy ticks to be available
+                try:
+                    if getattr(self.market_data, 'macro_eye', None) is not None and hasattr(self.market_data, 'get_macro_context_checked'):
+                        macro_vec, ok, mreason = self.market_data.get_macro_context_checked()
+                        if not ok:
+                            self._log_entry_gate(f"Macro data unavailable: {mreason}")
+                            return
+                        if ok and macro_vec is not None:
+                            macro_context = macro_vec
+                except Exception as e:
+                    self._log_entry_gate(f"Macro check error: {e}")
+                    return
+
             # --- LAYER 4: ORACLE ENGINE ---
             oracle_prediction = "NEUTRAL"
             oracle_confidence = 0.0
@@ -1220,10 +1683,19 @@ class TradingEngine:
             if oracle:
                 # Get last 60 candles
                 if len(history) >= 60:
-                    # Pass full candle objects, Oracle handles extraction
-                    oracle_prediction, oracle_confidence = oracle.predict(history[-60:])
-                    if oracle_confidence > 0.6:
-                        logger.info(f"[ORACLE] Prediction: {oracle_prediction} ({oracle_confidence:.2f})")
+                    # [UPGRADE] Use V2 Logic (AI + Macro + Fusion)
+                    oracle_result = await oracle.get_sniper_signal_v2(symbol, history[-60:])
+                    
+                    # Map result back to prediction/confidence for compatibility
+                    sig = oracle_result['signal']
+                    if sig == 1: oracle_prediction = "UP"
+                    elif sig == -1: oracle_prediction = "DOWN"
+                    else: oracle_prediction = "NEUTRAL"
+                    
+                    oracle_confidence = oracle_result['confidence']
+                    
+                    if oracle_confidence > 0.5: # Lower threshold as Fusion is stricter
+                        logger.info(f"[ORACLE] Prediction: {oracle_prediction} ({oracle_confidence:.2f}) | {oracle_result['reason']}")
 
                     # [HIGHEST INTELLIGENCE] LAYER 1: REGIME DETECTION
                     # Use Oracle's advanced math to double-check regime
@@ -1237,9 +1709,8 @@ class TradingEngine:
             # --- HIERARCHICAL AI DECISION LOGIC (v5.0) ---
             # 1. Supervisor: Detect Regime
             # Prepare data for Supervisor
-            atr_value, trend_strength = self._calculate_indicators(symbol)
-            rsi_value = self.market_data.calculate_rsi(symbol)
-            macro_context = self.market_data.get_macro_context()
+            # Note: atr_value/trend_strength/rsi_value/macro_context are precomputed above,
+            # and in strict mode are guaranteed to be based on real data.
             
             supervisor_data = {
                 'atr': atr_value,
@@ -1261,7 +1732,7 @@ class TradingEngine:
                 'current_price': tick['bid'],
                 'tick': tick,
                 'history': history,
-                'macro_context': self.market_data.get_macro_context(),
+                'macro_context': macro_context,
                 'rsi': rsi_value,
                 'trend_strength': trend_strength,
                 'atr': atr_value,
@@ -1280,6 +1751,21 @@ class TradingEngine:
                 # Or just default to RangeWorker as it's safer
                 action, confidence, reason = self.range_worker.get_signal(market_context)
                 reason = f"[DEFENSIVE] {reason}"
+
+            # --- ORACLE ALIGNMENT FILTER (Anti-Overlap) ---
+            # Prevents entries when the worker fights the Oracle with high confidence.
+            if action != "HOLD" and oracle_prediction in {"UP", "DOWN"} and oracle_confidence > 0.0:
+                aligns = (oracle_prediction == "UP" and action == "BUY") or (oracle_prediction == "DOWN" and action == "SELL")
+                if aligns:
+                    confidence = min(1.0, confidence + (0.05 * oracle_confidence))
+                    reason = f"{reason} | Oracle Align ({oracle_prediction} {oracle_confidence:.2f})"
+                else:
+                    # Strong disagreement should materially reduce confidence.
+                    confidence = max(0.0, confidence - (0.40 * oracle_confidence))
+                    reason = f"{reason} | Oracle Veto ({oracle_prediction} {oracle_confidence:.2f})"
+
+            # Final clamp
+            confidence = max(0.0, min(1.0, confidence))
                 
             # Create Signal Object
             signal = None
@@ -1292,7 +1778,10 @@ class TradingEngine:
                     metadata={
                         'regime': regime.name,
                         'worker': worker_name,
-                        'macro_data': self.market_data.get_macro_context(),
+                        'macro_data': macro_context,
+                        'atr': atr_value,
+                        'trend_strength': trend_strength,
+                        'rsi': rsi_value,
                         'oracle_prediction': oracle_prediction, # Keep Oracle for penalties
                         'nexus_signal_confidence': confidence # Map for compatibility
                     },
@@ -1349,26 +1838,32 @@ class TradingEngine:
             global_bias = 0.0
             brain_penalty = 1.0
             if self.global_brain and ("XAU" in symbol or "GOLD" in symbol):
-                # In a real scenario, we'd pass a dict of current prices for DXY, US10Y etc.
-                # For now, we assume the GlobalBrain is fetching its own data or using what's available
-                # We can pass the current tick price of the symbol itself as a reference
-                current_prices = {symbol: tick['bid']} 
-                correlation_signal = self.global_brain.analyze_impact(current_prices)
-                
-                if correlation_signal.score != 0.0:
-                    global_bias = correlation_signal.score
-                    logger.info(f"[GLOBAL_BRAIN] Correlation Bias: {global_bias:.2f} (Driver: {correlation_signal.driver})")
-                    
+                correlation_signal = None
+                try:
+                    # Live proxy feed (USDJPY/US500 etc) with confidence gating
+                    if hasattr(self.global_brain, 'get_bias_signal'):
+                        correlation_signal = self.global_brain.get_bias_signal()
+                    else:
+                        # Backward-compat: fall back to score-only
+                        global_bias = float(self.global_brain.get_bias())
+                except Exception:
+                    correlation_signal = None
+
+                if correlation_signal is not None and getattr(correlation_signal, 'confidence', 0.0) > 0.0:
+                    global_bias = float(correlation_signal.score)
+                    logger.info(
+                        f"[GLOBAL_BRAIN] Correlation Bias: {global_bias:.2f} (Driver: {correlation_signal.driver}, Conf: {correlation_signal.confidence:.2f})"
+                    )
+
                     # PENALTY LOGIC: If Global Brain disagrees, reduce size
                     if global_bias < -0.5 and signal.action == TradeAction.BUY:
-                         brain_penalty = 0.5
-                         logger.info(f"[GLOBAL_BRAIN] CAUTION: Bearish Correlation ({global_bias:.2f}). Reducing lots by 50%.")
+                        brain_penalty = 0.5
+                        logger.info(f"[GLOBAL_BRAIN] CAUTION: Bearish Correlation ({global_bias:.2f}). Reducing lots by 50%.")
                     elif global_bias > 0.5 and signal.action == TradeAction.SELL:
-                         brain_penalty = 0.5
-                         logger.info(f"[GLOBAL_BRAIN] CAUTION: Bullish Correlation ({global_bias:.2f}). Reducing lots by 50%.")
+                        brain_penalty = 0.5
+                        logger.info(f"[GLOBAL_BRAIN] CAUTION: Bullish Correlation ({global_bias:.2f}). Reducing lots by 50%.")
 
-            # Calculate ATR and trend for PPO
-            atr_value, trend_strength = self._calculate_indicators(symbol)
+            # ATR/trend already computed for this cycle; reuse to avoid introducing fallbacks.
 
             # Calculate position size with PPO optimization
             lot_size, lot_reason = self.calculate_position_size(
@@ -1452,8 +1947,8 @@ class TradingEngine:
                                 current = float(parts[0].split(':')[1].replace('s', '').strip())
                                 remaining = limit - current
                                 remaining_msg = f" Resuming in {remaining:.1f}s"
-                            except:
-                                pass
+                            except Exception as e:
+                                logger.debug(f"[PAUSED] Failed parsing cooldown remaining time: {e}")
                         
                         logger.info(f"[PAUSED] Trading Halted: {entry_reason}.{remaining_msg}")
                         self._last_cooldown_log_time = current_time
@@ -1475,7 +1970,14 @@ class TradingEngine:
             # --- GENERATE ENTRY SUMMARY ---
             
             # 1. Calculate Virtual TP using IronShield (Same logic as execution)
-            atr_value = self.market_data.calculate_atr(symbol, 14) if hasattr(self.market_data, 'calculate_atr') else 0.0010
+            atr_value = 0.0
+            try:
+                atr_value = float(signal.metadata.get('atr', 0.0) or 0.0)
+            except Exception:
+                atr_value = 0.0
+
+            if atr_value <= 0.0:
+                atr_value = self.market_data.calculate_atr(symbol, 14) if hasattr(self.market_data, 'calculate_atr') else 0.0010
             
             # Convert ATR to points based on symbol type
             if 'JPY' in symbol or 'XAU' in symbol:
@@ -1671,6 +2173,26 @@ class TradingEngine:
             # 1. Get Live Market Intelligence
             current_atr = self.market_data.calculate_atr(symbol)
             current_rsi = self.market_data.calculate_rsi(symbol)
+            if self._strict_entry:
+                try:
+                    if hasattr(self.market_data, 'calculate_atr_checked'):
+                        atr_v, ok, areason = self.market_data.calculate_atr_checked(symbol)
+                        if ok and atr_v is not None:
+                            current_atr = atr_v
+                        else:
+                            logger.warning(f"[STRICT] ATR unavailable for recovery orders: {areason}")
+                            current_atr = None
+                    if hasattr(self.market_data, 'calculate_rsi_checked'):
+                        rsi_v, ok, rreason = self.market_data.calculate_rsi_checked(symbol)
+                        if ok and rsi_v is not None:
+                            current_rsi = rsi_v
+                        else:
+                            logger.warning(f"[STRICT] RSI unavailable for recovery orders: {rreason}")
+                            current_rsi = None
+                except Exception as e:
+                    logger.warning(f"[STRICT] Indicator check failed for recovery orders: {e}")
+                    current_atr = None
+                    current_rsi = None
             
             # 2. Check Dynamic Hedge Trigger (if we have positions)
             # We only intervene if the bucket is losing
@@ -1694,12 +2216,14 @@ class TradingEngine:
                 pnl_str = f"${bucket_pnl:.2f}"
                 if bucket_pnl > 0: pnl_str = f"+{pnl_str}"
                 
+                rsi_disp = "NA" if current_rsi is None else f"{float(current_rsi):.1f}"
+                atr_disp = "NA" if current_atr is None else f"{float(current_atr):.4f}"
                 status_msg = (
                     f"\n>>> [AI STATUS MONITOR] <<<\n"
                     f"Positions:    {len(symbol_positions)} Active\n"
                     f"Net PnL:      {pnl_str}\n"
                     f"Strategy:     {strategy_status}\n"
-                    f"Market:       RSI {current_rsi:.1f} | ATR {current_atr:.4f}\n"
+                    f"Market:       RSI {rsi_disp} | ATR {atr_disp}\n"
                     f"Action:       Holding & Analyzing Tick Data...\n"
                     f"----------------------------------------------------"
                 )
@@ -1733,18 +2257,25 @@ class TradingEngine:
                 
                 if len(symbol_positions) == 1:
                     if bucket_id:
-                        stabilizer_data = {'atr': current_atr}
-                        stabilizer_triggered = self.position_manager.check_stabilizer_trigger(bucket_id, stabilizer_data)
+                        if current_atr is not None and float(current_atr) > 0:
+                            stabilizer_data = {'atr': float(current_atr), 'strict_entry': bool(self._strict_entry), 'atr_ok': True}
+                            stabilizer_triggered = self.position_manager.check_stabilizer_trigger(bucket_id, stabilizer_data)
+                        else:
+                            stabilizer_triggered = False
 
                 # Ask Iron Shield: "Should we hedge now?"
-                should_hedge, req_dist = shield.calculate_dynamic_hedge_trigger(
-                    entry_price=last_pos.price_open,
-                    current_price=tick['bid'] if last_pos.type == 0 else tick['ask'],
-                    trade_type=last_pos.type,
-                    atr=current_atr,
-                    rsi=current_rsi,
-                    hedge_count=len(symbol_positions) - 1
-                )
+                if self._strict_entry and (current_atr is None or current_atr <= 0 or current_rsi is None):
+                    should_hedge, req_dist = False, 0.0
+                    logger.warning("[STRICT] Skipping elastic hedge trigger: ATR/RSI unavailable")
+                else:
+                    should_hedge, req_dist = shield.calculate_dynamic_hedge_trigger(
+                        entry_price=last_pos.price_open,
+                        current_price=tick['bid'] if last_pos.type == 0 else tick['ask'],
+                        trade_type=last_pos.type,
+                        atr=current_atr,
+                        rsi=current_rsi,
+                        hedge_count=len(symbol_positions) - 1
+                    )
                 
                 if should_hedge or stabilizer_triggered:
                     # [AI INTELLIGENCE] Filter Strategic Hedges (IronShield)
@@ -1752,16 +2283,48 @@ class TradingEngine:
                     if should_hedge and not stabilizer_triggered:
                         # Construct market_data for AI
                         trend_strength = self.market_data.calculate_trend_strength(symbol)
-                        bb = self.market_data.calculate_bollinger_bands(symbol)
+                        if self._strict_entry and hasattr(self.market_data, 'calculate_trend_strength_checked'):
+                            ts_v, ok, treason = self.market_data.calculate_trend_strength_checked(symbol, 20)
+                            if not ok or ts_v is None:
+                                logger.warning(f"[STRICT] Strategic hedge blocked: trend unavailable ({treason})")
+                                should_hedge = False
+                            else:
+                                trend_strength = ts_v
+
+                        macro_context = self.market_data.get_macro_context()
+                        if self._strict_entry and getattr(self.market_data, 'macro_eye', None) is not None and hasattr(self.market_data, 'get_macro_context_checked'):
+                            vec, ok, mreason = self.market_data.get_macro_context_checked()
+                            if not ok:
+                                logger.warning(f"[STRICT] Strategic hedge blocked: macro data unavailable ({mreason})")
+                                should_hedge = False
+                            elif vec is not None:
+                                macro_context = vec
+
+                        if not should_hedge:
+                            # Skip constructing additional AI inputs when strict gating blocks.
+                            pass
+
+                        bb_upper = None
+                        bb_lower = None
+                        if hasattr(self.market_data, 'calculate_bollinger_bands_checked'):
+                            bb, ok, _ = self.market_data.calculate_bollinger_bands_checked(symbol)
+                            if ok and bb:
+                                bb_upper = bb.get('upper')
+                                bb_lower = bb.get('lower')
+                        else:
+                            bb = self.market_data.calculate_bollinger_bands(symbol)
+                            bb_upper = bb.get('upper')
+                            bb_lower = bb.get('lower')
+
                         market_data = {
                             'atr': current_atr,
                             'rsi': current_rsi,
                             'trend_strength': trend_strength,
                             'volatility_ratio': self.market_data.market_state.get_volatility_ratio(),
                             'close': tick['bid'],
-                            'bb_upper': bb['upper'],
-                            'bb_lower': bb['lower'],
-                            'macro_context': self.market_data.get_macro_context()
+                            'bb_upper': bb_upper,
+                            'bb_lower': bb_lower,
+                            'macro_context': macro_context,
                         }
 
                         # Detect Regime
@@ -1826,9 +2389,47 @@ class TradingEngine:
                                     shed_candidates = self.hedge_intel.find_shedding_opportunity(symbol_positions)
                                     if shed_candidates:
                                         logger.warning(f"[SURVIVAL] Shedding 2 trades to free margin...")
-                                        # Close the candidates
-                                        for pos in shed_candidates:
-                                            await self.broker.close_position(pos.ticket)
+                                        # Close the candidates as a batch (faster, no re-fetch per ticket)
+                                        if hasattr(self.broker, 'close_positions'):
+                                            try:
+                                                close_results = await self.broker.close_positions(
+                                                    shed_candidates,
+                                                    trace={
+                                                        'strict_entry': bool(self._strict_entry),
+                                                        'strict_ok': True,
+                                                        'atr_ok': None,
+                                                        'rsi_ok': None,
+                                                        'obi_ok': None,
+                                                        'reason': 'SURVIVAL_SHED_MARGIN',
+                                                    },
+                                                )
+                                            except TypeError:
+                                                close_results = await self.broker.close_positions(shed_candidates)
+                                            for ticket, res in (close_results or {}).items():
+                                                r = res or {}
+                                                ok = r.get('retcode') == mt5.TRADE_RETCODE_DONE
+                                                if ok:
+                                                    logger.warning(f"[SURVIVAL] Shed closed ticket={ticket}")
+                                                else:
+                                                    logger.error(
+                                                        f"[SURVIVAL] Shed close failed ticket={ticket} retcode={r.get('retcode')} comment={r.get('comment', '')}"
+                                                    )
+                                        else:
+                                            for pos in shed_candidates:
+                                                try:
+                                                    await self.broker.close_position(
+                                                        pos.ticket,
+                                                        trace={
+                                                            'strict_entry': bool(self._strict_entry),
+                                                            'strict_ok': True,
+                                                            'atr_ok': None,
+                                                            'rsi_ok': None,
+                                                            'obi_ok': None,
+                                                            'reason': 'SURVIVAL_SHED_MARGIN',
+                                                        },
+                                                    )
+                                                except TypeError:
+                                                    await self.broker.close_position(pos.ticket)
                                         return True # We took action (shedding), so we are "done" for this tick
                                     
                                     return False # Cannot hedge, let it ride
@@ -1871,12 +2472,38 @@ class TradingEngine:
                             # Construct features for the policy
                             spread_points = (tick['ask'] - tick['bid']) / props['point_size']
                             atr_points = current_atr / props['point_size']
+
+                            # Strict gating: policy requires real candle/volume context.
+                            candles_hist = self.market_data.candles.get_history(symbol)
+                            if self._strict_entry:
+                                if current_atr is None or current_atr <= 0:
+                                    logger.warning("[STRICT] Policy hedge blocked: ATR unavailable")
+                                    should_hedge = False
+                                if current_rsi is None:
+                                    logger.warning("[STRICT] Policy hedge blocked: RSI unavailable")
+                                    should_hedge = False
+                                if not candles_hist or len(candles_hist) < 21:
+                                    logger.warning("[STRICT] Policy hedge blocked: insufficient candles")
+                                    should_hedge = False
+
+                            # If strict mode blocked this hedge, skip policy evaluation and continue to normal management.
+                            if self._strict_entry and not should_hedge and not stabilizer_triggered:
+                                # Do not return early; allow exits/other management to run.
+                                pass
                             
-                            # Calculate Trend Slope (using MarketData)
-                            try:
-                                trend_strength = self.market_data.calculate_trend_strength(symbol)
-                            except Exception:
-                                trend_strength = 0.0
+                            # Calculate Trend Slope in points/bar (candle-derived)
+                            candles_hist = self.market_data.candles.get_history(symbol)
+                            closes = []
+                            if candles_hist:
+                                closes = [c.get('close') for c in candles_hist if isinstance(c, dict) and 'close' in c]
+                            if len(closes) >= 2:
+                                try:
+                                    slope_price = linear_regression_slope([float(x) for x in closes[-10:]])
+                                    trend_slope_points = float(slope_price) / max(1e-9, props['point_size'])
+                                except Exception:
+                                    trend_slope_points = 0.0
+                            else:
+                                trend_slope_points = 0.0
 
                             # [AI INTELLIGENCE] Calculate Volatility Z-Score
                             # We need a history of ATR or Volume to calculate Z-Score.
@@ -1884,13 +2511,35 @@ class TradingEngine:
                             # relative volume metric if available, or default to 0.0 safely.
                             # Ideally, MarketData should track this. For now, we use a safe proxy.
                             vol_z_score = 0.0
-                            if hasattr(self.market_data, 'get_volume_z_score'):
+                            if self._strict_entry and should_hedge and hasattr(self.market_data, 'get_volume_z_score_checked'):
+                                vz, ok, vreason = self.market_data.get_volume_z_score_checked(symbol)
+                                if not ok or vz is None:
+                                    logger.warning(f"[STRICT] Policy hedge blocked: vol_z unavailable ({vreason})")
+                                    should_hedge = False
+                                    policy_reasons = [f"strict_block:vol_z_unavailable:{vreason}"]
+                                else:
+                                    vol_z_score = float(vz)
+                            elif hasattr(self.market_data, 'get_volume_z_score'):
                                 vol_z_score = self.market_data.get_volume_z_score(symbol)
 
+                            # Candle-derived breakout quality and structure break (no placeholders)
+                            breakout_quality = 0.5
+                            structure_break = 0.0
+                            if candles_hist and len(candles_hist) >= 2:
+                                last = candles_hist[-1]
+                                try:
+                                    breakout_quality = simple_breakout_quality(float(last['high']), float(last['low']), float(last['close']))
+                                except Exception:
+                                    breakout_quality = 0.5
+                                try:
+                                    structure_break = simple_structure_break(candles_hist, lookback=20)
+                                except Exception:
+                                    structure_break = 0.0
+
                             features = {
-                                "regime_trend": simple_regime_trend(trend_strength, atr_points),
-                                "breakout_quality": 0.5, # Placeholder - requires candle pattern analysis
-                                "structure_break": 0.0, # Placeholder - requires support/resistance levels
+                                "regime_trend": simple_regime_trend(trend_slope_points, atr_points),
+                                "breakout_quality": breakout_quality,
+                                "structure_break": structure_break,
                                 "drawdown_urgency": min(1.0, current_drawdown / 1000.0), # Crude proxy
                                 "spread_atr": spread_atr(spread_points, atr_points),
                                 "vol_z": vol_z_score,
@@ -1916,7 +2565,8 @@ class TradingEngine:
                                         price=context["price"], lots=hedge_lot,
                                         features=features, context=context, decision=decision
                                     ))
-                                return False
+                                # Do NOT return early here (would skip exit logic). Just skip placing this hedge.
+                                should_hedge = False
                                 
                             # Apply Policy Outputs
                             tp_price = decision["tp_price"]
@@ -1988,25 +2638,32 @@ class TradingEngine:
                                 context=context if FLAGS.ENABLE_POLICY else {},
                                 decision={"tp_price": tp_price, "sl_price": sl_price, "confidence": confidence, "reasons": policy_reasons}
                             ))
-                        
+
                         # Execute directly via broker to bypass standard entry checks
-                        self.broker.execute_order(
-                            action="OPEN",
-                            symbol=symbol,
-                            order_type=hedge_type,
-                            volume=hedge_lot,
-                            price=tick['bid'] if hedge_type == "SELL" else tick['ask'],
-                            sl=0.0, tp=0.0,
-                            comment="Elastic_Hedge"
-                        )
-                        elastic_hedge_triggered = True
-                        
-                        # [AI INTELLIGENCE] Update Bucket TP immediately
-                        # Now that we have a new hedge, the "Survival TP" changes.
-                        # We must update all trades in the bucket to the new target.
-                        if bucket_id:
-                            await self.position_manager.update_bucket_tp(self.broker, symbol, bucket_id, tick['bid'])
-                        return True # Managed
+                        if should_hedge or stabilizer_triggered:
+                            self.broker.execute_order(
+                                action="OPEN",
+                                symbol=symbol,
+                                order_type=hedge_type,
+                                volume=hedge_lot,
+                                price=tick['bid'] if hedge_type == "SELL" else tick['ask'],
+                                sl=0.0, tp=0.0,
+                                strict_entry=bool(self._strict_entry),
+                                strict_ok=(not self._strict_entry) or (current_atr is not None and float(current_atr) > 0 and current_rsi is not None),
+                                atr_ok=bool(current_atr is not None and float(current_atr) > 0),
+                                rsi_ok=bool(current_rsi is not None),
+                                obi_ok=bool(tick.get('obi_ok', False)),
+                                trace_reason="OPEN_ELASTIC_HEDGE",
+                                comment="Elastic_Hedge"
+                            )
+                            elastic_hedge_triggered = True
+
+                            # [AI INTELLIGENCE] Update Bucket TP immediately
+                            # Now that we have a new hedge, the "Survival TP" changes.
+                            # We must update all trades in the bucket to the new target.
+                            if bucket_id:
+                                await self.position_manager.update_bucket_tp(self.broker, symbol, bucket_id, tick['bid'])
+                            return True # Managed
 
             # If Elastic Defense didn't trigger a hedge, we still check for EXITS (TP/SL)
             # But we should probably prevent Zone Recovery from adding a hedge if Elastic Defense said "Wait".

@@ -231,7 +231,7 @@ class AetherBot:
             # Initialize Oracle (Layer 4)
             print(">>> [INIT] Loading Oracle (Price Prediction)...", flush=True)
             # v5.5.0: Pass broker and tick_analyzer to Oracle
-            self.oracle = Oracle(mt5_adapter=self.broker, tick_analyzer=self.tick_analyzer)
+            self.oracle = Oracle(mt5_adapter=self.broker, tick_analyzer=self.tick_analyzer, global_brain=self.global_brain)
             print(">>> [INIT] Oracle Online.", flush=True)
 
             print(">>> [INIT] Starting Trading Engine...", flush=True)
@@ -429,6 +429,80 @@ class AetherBot:
         logger.info("Performing graceful shutdown...")
 
         self.running = False
+
+        # -------------------------------
+        # End-of-session learning (daily)
+        # -------------------------------
+        # Goal: maximize profit while penalizing drawdown, without changing live weights intraday.
+        try:
+            enable_tuner = str(os.getenv("AETHER_ENABLE_SESSION_TUNING", "1")).strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+            if enable_tuner and getattr(self, "oracle", None) is not None and getattr(self.oracle, "tuner", None) is not None:
+                stats = self.trading_engine.get_session_stats() if self.trading_engine else {}
+                total_profit = float((stats or {}).get("total_profit", 0.0) or 0.0)
+                max_dd_pct = float((stats or {}).get("max_drawdown_pct", 0.0) or 0.0)
+
+                acct = self.broker.get_account_info() if self.broker else {}
+                balance = float((acct or {}).get("balance", 0.0) or 0.0)
+                # Penalty is scaled by starting/ending balance; if unknown, fall back to 0.
+                if balance <= 0:
+                    balance = 0.0
+
+                try:
+                    dd_lambda = float(os.getenv("AETHER_TUNER_DD_LAMBDA", "0.75"))
+                except Exception:
+                    dd_lambda = 0.75
+
+                try:
+                    cost_per_trade = float(os.getenv("AETHER_TUNER_COST_PER_TRADE", "0.0"))
+                except Exception:
+                    cost_per_trade = 0.0
+
+                trades_closed = float((stats or {}).get("trades_closed", 0) or 0)
+
+                # Risk-adjusted reward: profit minus drawdown penalty (scaled by balance) minus per-trade friction.
+                dd_penalty = dd_lambda * (balance * max_dd_pct)
+                reward = total_profit - dd_penalty - (cost_per_trade * trades_closed)
+
+                params = getattr(self.oracle, "last_tuner_params", None)
+                if isinstance(params, dict) and params:
+                    self.oracle.tuner.report_result(params, pnl=float(reward))
+                    logger.info(
+                        f"[SESSION_TUNING] Reported reward=${reward:.2f} pnl=${total_profit:.2f} dd_pct={max_dd_pct*100:.2f}% dd_penalty=${dd_penalty:.2f} trades_closed={int(trades_closed)}"
+                    )
+                else:
+                    logger.info("[SESSION_TUNING] Skipped: no tuner params recorded this session")
+        except Exception as e:
+            logger.warning(f"[SESSION_TUNING] Failed: {e}")
+
+        # Optional: offline PPO evolution (explicitly gated)
+        try:
+            enable_ppo_evolve = str(os.getenv("AETHER_ENABLE_PPO_EVOLVE", "0")).strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+            if enable_ppo_evolve and self.ppo_guardian is not None:
+                # Avoid evolving while trades are still open (incomplete episodes)
+                open_positions = 0
+                try:
+                    pos = self.broker.get_positions() if self.broker else []
+                    open_positions = len(pos) if pos else 0
+                except Exception:
+                    open_positions = 0
+
+                if open_positions == 0:
+                    ok = bool(self.ppo_guardian.evolve())
+                    logger.info(f"[PPO_EVOLVE] Completed ok={ok} experiences={self.ppo_guardian.get_experience_count()}")
+                else:
+                    logger.info(f"[PPO_EVOLVE] Skipped (open_positions={open_positions})")
+        except Exception as e:
+            logger.warning(f"[PPO_EVOLVE] Failed: {e}")
 
         # Shutdown trading engine database
         if self.trading_engine:

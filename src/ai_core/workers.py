@@ -68,6 +68,9 @@ class RangeWorker(BaseWorker):
         # Boost confidence to ensure trade execution (unless penalized)
         if action != "HOLD":
             confidence = max(0.6, confidence) # Minimum 0.6 to trigger
+
+        # Safety clamp
+        confidence = max(0.0, min(1.0, confidence))
             
         return action, confidence, reason
 
@@ -116,6 +119,9 @@ class TrendWorker(BaseWorker):
                     reason += " - Buy Pressure"
 
         if action != "HOLD":
-             confidence = max(0.6, confidence)
+            confidence = max(0.6, confidence)
+
+        # Safety clamp
+        confidence = max(0.0, min(1.0, confidence))
 
         return action, confidence, reason

@@ -9,13 +9,19 @@ class Position:
     type: int # 0=BUY, 1=SELL
     volume: float
     price_open: float
+    price_current: float # Added current price field
     sl: float
     tp: float
     profit: float
     swap: float
-    comment: str
-    time: int
+    commission: float = 0.0 # Added commission field
+    comment: str = ""
+    time: int = 0
     magic: int = 0 # Added magic number field
+
+    def calculate_net_pnl(self) -> float:
+        """Calculates Net PnL including Swap and Commission."""
+        return self.profit + self.swap + self.commission
 
 @dataclass
 class Deal:
@@ -67,7 +73,8 @@ class BrokerAdapter(ABC):
                       tp: Optional[float] = None,
                       magic: int = 0,
                       comment: str = "",
-                      ticket: Optional[int] = None) -> Dict:
+                      ticket: Optional[int] = None,
+                      **kwargs) -> Dict:
         """
         Execute a trade.
         action: OPEN, CLOSE, MODIFY

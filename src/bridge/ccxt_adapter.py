@@ -35,7 +35,14 @@ class CCXTAdapter(BrokerAdapter):
         try:
             ohlcv = self.exchange.fetch_ohlcv(symbol, ccxt_tf, limit=limit)
             # Format: [timestamp, open, high, low, close, volume]
-            return [{'time': x[0], 'open': x[1], 'high': x[2], 'low': x[3], 'close': x[4], 'volume': x[5]} for x in ohlcv]
+            data = []
+            for x in ohlcv:
+                ts = int(x[0])
+                # CCXT timestamps are typically milliseconds since epoch
+                if ts > 10_000_000_000:
+                    ts = int(ts / 1000)
+                data.append({'time': ts, 'open': x[1], 'high': x[2], 'low': x[3], 'close': x[4], 'volume': x[5]})
+            return data
         except Exception as e:
             logger.error(f"Fetch OHLCV failed: {e}")
             return []
@@ -59,7 +66,13 @@ class CCXTAdapter(BrokerAdapter):
         except Exception:
             return None
 
-    def execute_order(self, symbol, action, volume, order_type, price=None, sl=0.0, tp=0.0, magic=0, comment="") -> Dict:
+    def execute_order(self, symbol, action, volume, order_type, price=None, sl=0.0, tp=0.0, magic=0, comment="", **kwargs) -> Dict:
+        strict_entry = bool(kwargs.get('strict_entry', False) or getattr(self, 'strict_entry', False))
+        strict_ok = kwargs.get('strict_ok', None)
+        if strict_entry and action == "OPEN" and strict_ok is not True:
+            msg = f"STRICT_BLOCK: OPEN rejected (strict_ok={strict_ok}) symbol={symbol}"
+            logger.warning(msg)
+            return {"ticket": None, "retcode": -1, "comment": msg}
         try:
             side = 'buy' if order_type == 'BUY' else 'sell'
             type_ = 'limit' if price else 'market'

@@ -3,8 +3,17 @@ import torch.nn as nn
 import numpy as np
 import logging
 import os
+from typing import Optional
 from .nexus_transformer import TimeSeriesTransformer
 from .architect import Architect
+from .graph_neural_net import GNNPredictor
+from .bayesian_tuner import BayesianOptimizer
+from .contrastive_fusion import ContrastiveFusion
+
+try:
+    import MetaTrader5 as mt5
+except Exception:  # pragma: no cover
+    mt5 = None
 
 logger = logging.getLogger("Oracle")
 
@@ -13,13 +22,63 @@ class Oracle:
     The Oracle Engine: Uses Transformer models to predict future price movements.
     Wraps the institutional-grade TimeSeriesTransformer.
     """
-    def __init__(self, mt5_adapter=None, tick_analyzer=None, model_path="models/nexus_transformer.pth"):
+    def __init__(self, mt5_adapter=None, tick_analyzer=None, global_brain=None, model_path="models/nexus_transformer.pth"):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = None
         self.model_path = model_path
         self.architect = Architect(mt5_adapter) if mt5_adapter else None
         self.tick_pressure = tick_analyzer
+        self.global_brain = global_brain
+        self._market_book_symbols = set()
+        
+        # --- ADVANCED AI MODULES ---
+        self.gnn = GNNPredictor()
+        self.tuner = BayesianOptimizer()
+        self.fusion = ContrastiveFusion()
+        
         self.load_model()
+
+    def _get_order_book_imbalance(self, symbol: str) -> Optional[float]:
+        """Return normalized order-book imbalance in [-1, 1] when MT5 market book is available."""
+        if not symbol or mt5 is None:
+            return None
+
+        try:
+            # Ensure book subscription (MT5 requires market_book_add).
+            if symbol not in self._market_book_symbols:
+                try:
+                    if mt5.market_book_add(symbol):
+                        self._market_book_symbols.add(symbol)
+                except Exception:
+                    # If subscription fails, we can still try to read; MT5 may return None.
+                    pass
+
+            book = mt5.market_book_get(symbol)
+            if not book:
+                return None
+
+            bid_vol = 0.0
+            ask_vol = 0.0
+            for row in book:
+                # row.type: 0=BUY, 1=SELL (in most MT5 builds)
+                rtype = getattr(row, 'type', None)
+                rvol = float(getattr(row, 'volume', 0.0) or 0.0)
+                if rvol <= 0:
+                    continue
+                if rtype == 0:
+                    bid_vol += rvol
+                elif rtype == 1:
+                    ask_vol += rvol
+
+            denom = bid_vol + ask_vol
+            if denom <= 0:
+                return None
+
+            imbalance = (bid_vol - ask_vol) / denom
+            # Hard clamp for safety
+            return max(-1.0, min(1.0, float(imbalance)))
+        except Exception:
+            return None
 
     def load_model(self):
         """Loads the Transformer model weights."""
@@ -77,59 +136,109 @@ class Oracle:
 
     async def get_sniper_signal_v2(self, symbol: str, candles: list) -> dict:
         """
-        v5.5.0: THE ORACLE (AI + Reality + Structure)
-        Replaces legacy sniper logic with Reality Lock and Spatial Veto.
+        v6.0.0: THE ORACLE (AI + Macro + Fusion + Tuning)
+        Replaces legacy logic with Advanced AI Stack.
         Returns: Dict with 'signal' (1, -1, 0), 'confidence', 'reason'
         """
-        # 1. AI Prediction (The Brain)
+        # 0. Bayesian Tuning: Get dynamic thresholds
+        params = self.tuner.suggest_params()
+        # Persist last params used so end-of-session feedback can tune against real outcomes.
+        try:
+            self.last_tuner_params = dict(params) if isinstance(params, dict) else None
+        except Exception:
+            self.last_tuner_params = None
+        vel_threshold = params.get("velocity_threshold", 0.65)
+
+        # 1. Macro Intelligence (GNN)
+        # In a real scenario, we would fetch DXY/Oil prices here. 
+        # For now, we simulate or use available data if possible.
+        # We pass the current Gold price as a proxy for the node state.
+        current_price = candles[-1]['close'] if candles else 0
+        macro_signal = 0.0
+        try:
+            if self.global_brain is not None and hasattr(self.global_brain, 'get_bias'):
+                macro_signal = float(self.global_brain.get_bias())
+            else:
+                # Fallback (legacy/demo): simulated macro
+                macro_pred = self.gnn.predict(current_price)  # 0..1
+                macro_signal = (macro_pred - 0.5) * 2
+        except Exception:
+            macro_signal = 0.0
+
+        # 2. Micro Intelligence (Transformer)
         ai_pred, ai_conf = self.predict(candles)
         
-        ai_direction = 0
-        if ai_pred == "UP": ai_direction = 1
-        elif ai_pred == "DOWN": ai_direction = -1
+        ai_score = 0.0
+        if ai_pred == "UP": ai_score = ai_conf
+        elif ai_pred == "DOWN": ai_score = -ai_conf
         
-        if ai_direction == 0:
-            return {'signal': 0, 'confidence': 0.0, 'reason': "AI Neutral"}
-
-        # 2. Real-Time Reality (The Eyes) - Reality Lock
+        # 3. Reality Lock (Tick Pressure)
         pressure_val = 0.0
+        pressure_score = 0.0 # Normalized -1 to 1
         if self.tick_pressure:
             metrics = self.tick_pressure.get_pressure_metrics()
-            # pressure_score is typically >15 or <-15 for strong moves
-            # dominance is BUY/SELL
             pressure_val = metrics.get('pressure_score', 0.0)
-            
-            # REALITY LOCK:
-            # If AI says BUY, Pressure must NOT be strongly SELLING (<-15)
-            if ai_direction == 1 and pressure_val < -15.0:
-                logger.info(f"[ORACLE] BLOCKED BUY: AI says Up, but Pressure is Down ({pressure_val:.2f})")
-                return {'signal': 0, 'confidence': 0.0, 'reason': f"Reality Lock (Pressure {pressure_val:.1f})"}
-                
-            # If AI says SELL, Pressure must NOT be strongly BUYING (>15)
-            if ai_direction == -1 and pressure_val > 15.0:
-                logger.info(f"[ORACLE] BLOCKED SELL: AI says Down, but Pressure is Up ({pressure_val:.2f})")
-                return {'signal': 0, 'confidence': 0.0, 'reason': f"Reality Lock (Pressure {pressure_val:.1f})"}
+            # Normalize pressure without saturating to +/-1 too easily.
+            # tanh keeps output bounded but still varying.
+            norm = float(os.getenv("AETHER_PRESSURE_NORM", "50"))
+            if norm <= 0:
+                norm = 50.0
+            pressure_score = float(np.tanh(float(pressure_val) / norm))
 
-        # 3. Spatial Awareness (The Map) - Architect Veto
-        if self.architect:
+        # 4. Contrastive Fusion (The Judge)
+        # Order book modality: use MT5 market book imbalance if available; else fall back to macro proxy.
+        order_book_signal = self._get_order_book_imbalance(symbol)
+        if order_book_signal is None:
+            order_book_signal = macro_signal
+
+        signals = {
+            "tick_velocity": pressure_score,
+            "candle_pattern": ai_score,
+            "order_book": float(order_book_signal)
+        }
+        
+        coherence = self.fusion.compute_coherence(signals)
+        final_confidence = self.fusion.validate_signal(ai_score, coherence)
+
+        # Log the AI Council deliberation
+        if str(os.getenv("AETHER_ORACLE_FUSION_DEBUG", "0")).strip().lower() in ("1", "true", "yes", "on"):
+            logger.info(
+                f"[ORACLE] Council: Macro({macro_signal:.2f}) | Micro({ai_score:.2f}) | Pressure({pressure_score:.2f}, raw={pressure_val:.2f}) | OBI({float(order_book_signal):.2f}) -> Coherence: {coherence:.2f}"
+            )
+        else:
+            logger.info(
+                f"[ORACLE] Council: Macro({macro_signal:.2f}) | Micro({ai_score:.2f}) | Pressure({pressure_score:.2f}) -> Coherence: {coherence:.2f}"
+            )
+
+        # 5. Decision Logic
+        signal = 0
+        reason = "Neutral"
+        
+        if final_confidence > vel_threshold: # Dynamic Threshold from Bayesian Tuner
+            if ai_score > 0:
+                signal = 1
+                reason = f"BUY (Conf: {final_confidence:.2f} | Coh: {coherence:.2f})"
+            elif ai_score < 0:
+                signal = -1
+                reason = f"SELL (Conf: {final_confidence:.2f} | Coh: {coherence:.2f})"
+        else:
+            reason = f"Weak Signal (Conf: {final_confidence:.2f} < {vel_threshold:.2f})"
+
+        # 6. Spatial Veto (Architect) - The final safety check
+        if signal != 0 and self.architect:
             structure = self.architect.get_market_structure(symbol)
             if structure:
-                # RULE: Don't Buy if we are hitting the Ceiling
-                if ai_direction == 1 and structure['status'] == 'BLOCKED_UP':
-                    logger.info(f"[ARCHITECT] VETO BUY: Hitting H1 Resistance at {structure['resistance']:.2f} (Gap: {structure['room_up']:.2f})")
-                    return {'signal': 0, 'confidence': 0.0, 'reason': f"Blocked by Resistance ({structure['resistance']:.2f})"}
+                if signal == 1 and structure['status'] == 'BLOCKED_UP':
+                    logger.info(f"[ARCHITECT] VETO BUY: Resistance at {structure['resistance']:.2f}")
+                    return {'signal': 0, 'confidence': 0.0, 'reason': "Blocked by Resistance"}
+                if signal == -1 and structure['status'] == 'BLOCKED_DOWN':
+                    logger.info(f"[ARCHITECT] VETO SELL: Support at {structure['support']:.2f}")
+                    return {'signal': 0, 'confidence': 0.0, 'reason': "Blocked by Support"}
 
-                # RULE: Don't Sell if we are hitting the Floor
-                if ai_direction == -1 and structure['status'] == 'BLOCKED_DOWN':
-                    logger.info(f"[ARCHITECT] VETO SELL: Hitting H1 Support at {structure['support']:.2f} (Gap: {structure['room_down']:.2f})")
-                    return {'signal': 0, 'confidence': 0.0, 'reason': f"Blocked by Support ({structure['support']:.2f})"}
-
-        # 4. Final Decision
-        # If we passed all checks, we return the signal
         return {
-            'signal': ai_direction, 
-            'confidence': ai_conf, 
-            'reason': f"Aligned: AI({ai_conf:.2f}) + Pressure({pressure_val:.1f})"
+            'signal': signal, 
+            'confidence': final_confidence, 
+            'reason': reason
         }
 
     def get_sniper_signal(self, prices: list, volumes: list) -> str:
@@ -267,26 +376,39 @@ class Oracle:
             if len(candles) < 60:
                 return "NEUTRAL", 0.0
                 
+            use_raw = str(os.getenv("AETHER_ORACLE_USE_RAW_OHLCV", "0")).strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+
             data = []
-            for c in candles[-60:]:
-                # Normalize or use raw? The model likely expects normalized or specific scaling.
-                # Assuming raw for now, or simple log returns? 
-                # Given the context, we'll pass raw values and hope the model handles it 
-                # (or the Transformer handles the embedding).
-                # NOTE: Usually models need normalization. 
-                # But for this fix, we just want to match the input shape.
-                
+            recent = candles[-60:]
+            prev_close = float(recent[0].get('close', 0.0) or 0.0)
+            for c in recent:
                 # Check keys - MT5 usually gives 'tick_volume' or 'real_volume'
-                vol = c.get('tick_volume', 0) or c.get('volume', 0)
-                
-                row = [
-                    float(c['open']),
-                    float(c['high']),
-                    float(c['low']),
-                    float(c['close']),
-                    float(vol)
-                ]
+                vol = float(c.get('tick_volume', 0) or c.get('volume', 0) or 0.0)
+
+                o = float(c.get('open', 0.0) or 0.0)
+                h = float(c.get('high', 0.0) or 0.0)
+                l = float(c.get('low', 0.0) or 0.0)
+                cl = float(c.get('close', 0.0) or 0.0)
+
+                if use_raw or prev_close <= 0 or cl <= 0:
+                    row = [o, h, l, cl, vol]
+                else:
+                    # Normalize to returns relative to previous close to avoid saturation
+                    row = [
+                        (o / prev_close) - 1.0,
+                        (h / prev_close) - 1.0,
+                        (l / prev_close) - 1.0,
+                        (cl / prev_close) - 1.0,
+                        float(np.log1p(max(0.0, vol))),
+                    ]
+
                 data.append(row)
+                prev_close = cl if cl > 0 else prev_close
             
             # Convert to tensor: [1, 60, 5]
             input_tensor = torch.tensor(data, dtype=torch.float32).unsqueeze(0).to(self.device)

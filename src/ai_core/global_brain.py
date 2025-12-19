@@ -18,6 +18,13 @@ import numpy as np
 from typing import Dict, Optional, List
 from dataclasses import dataclass
 
+try:
+    import MetaTrader5 as mt5
+    from datetime import datetime
+except Exception:  # pragma: no cover
+    mt5 = None
+    datetime = None
+
 logger = logging.getLogger("GlobalBrain")
 
 @dataclass
@@ -30,17 +37,37 @@ class CorrelationSignal:
 class GlobalBrain:
     def __init__(self, market_data_manager):
         self.market_data = market_data_manager
-        self.correlations = {
-            "DXY": -0.85,   # Strong Inverse
-            "US10Y": -0.70, # Strong Inverse
-            "SPX500": -0.40 # Weak Inverse (Risk On/Off)
-        }
+        # Use proxies from config when available (MarketDataManager.CorrelationMonitor)
+        usd_proxy = None
+        risk_proxy = None
+        try:
+            if getattr(self.market_data, 'macro_eye', None):
+                usd_proxy = getattr(self.market_data.macro_eye, 'usd_symbol', None)
+                risk_proxy = getattr(self.market_data.macro_eye, 'risk_symbol', None)
+        except Exception:
+            usd_proxy = None
+            risk_proxy = None
+
+        # Correlation signs relative to Gold (XAUUSD)
+        # - USD strength up => Gold down
+        # - Risk-on up => Gold down
+        self.correlations = {}
+        if usd_proxy:
+            self.correlations[usd_proxy] = -0.85
+        if risk_proxy:
+            self.correlations[risk_proxy] = -0.40
+
         # Thresholds for "Significant Move" (percent change in last 1 min)
-        self.thresholds = {
-            "DXY": 0.02,    # 0.02% move is significant for currency
-            "US10Y": 0.05,
-            "SPX500": 0.05
-        }
+        self.thresholds = {}
+        if usd_proxy:
+            self.thresholds[usd_proxy] = 0.02
+        if risk_proxy:
+            self.thresholds[risk_proxy] = 0.05
+
+        # Cache last computed signal to avoid overloading terminal on every tick
+        self._cache_interval_s = 1.0
+        self._last_signal: Optional[CorrelationSignal] = None
+        self._last_fetch_ts = 0.0
         self.last_prices = {}
         self.last_update = 0
         
@@ -104,7 +131,75 @@ class GlobalBrain:
         )
 
     def get_bias(self) -> float:
-        """Get the current trading bias (-1.0 to 1.0)."""
-        # In a real implementation, this would fetch live prices from MT5
-        # For now, we return 0.0 if no data, or the calculated score
-        return 0.0
+        """Get the current trading bias (-1.0 to 1.0) from live proxy symbols."""
+        sig = self.get_bias_signal()
+        return float(sig.score) if sig else 0.0
+
+    def get_bias_signal(self) -> CorrelationSignal:
+        """Fetch live proxy ticks and compute a correlation bias signal.
+
+        Returns a CorrelationSignal with:
+        - score in [-1, 1]
+        - confidence in [0, 1]
+        - driver describing primary proxy move
+        """
+        now = time.time()
+        if self._last_signal is not None and (now - self._last_fetch_ts) < self._cache_interval_s:
+            return self._last_signal
+
+        if not self.correlations:
+            self._last_fetch_ts = now
+            self._last_signal = CorrelationSignal(score=0.0, driver="NO_PROXIES", confidence=0.0, timestamp=now)
+            return self._last_signal
+
+        if mt5 is None or datetime is None:
+            self._last_fetch_ts = now
+            self._last_signal = CorrelationSignal(score=0.0, driver="MT5_UNAVAILABLE", confidence=0.0, timestamp=now)
+            return self._last_signal
+
+        total_score = 0.0
+        primary_driver = "NEUTRAL"
+        max_impact = 0.0
+        contributors = 0
+
+        for sym, correlation in self.correlations.items():
+            try:
+                ticks = mt5.copy_ticks_from(sym, datetime.now(), 200, mt5.COPY_TICKS_ALL)
+                if ticks is None or len(ticks) < 2:
+                    continue
+                current = float(ticks[-1][1])  # bid
+                prev = float(ticks[0][1])
+                if prev == 0:
+                    continue
+
+                pct_change = ((current - prev) / prev) * 100.0
+                threshold = float(self.thresholds.get(sym, 0.0))
+                if threshold > 0.0 and abs(pct_change) < threshold:
+                    continue
+
+                impact = pct_change * float(correlation) * 10.0
+                total_score += impact
+                contributors += 1
+
+                if abs(impact) > max_impact:
+                    max_impact = abs(impact)
+                    direction = "SURGE" if pct_change > 0 else "DUMP"
+                    primary_driver = f"{sym}_{direction}"
+            except Exception:
+                continue
+
+        final_score = float(np.clip(total_score, -1.0, 1.0))
+        confidence = 0.0
+        if contributors > 0:
+            # Confidence grows with magnitude and number of agreeing contributors
+            confidence = float(min(abs(total_score), 1.0))
+
+        self._last_fetch_ts = now
+        self._last_signal = CorrelationSignal(
+            score=final_score,
+            driver=primary_driver,
+            confidence=confidence,
+            timestamp=now,
+        )
+
+        return self._last_signal

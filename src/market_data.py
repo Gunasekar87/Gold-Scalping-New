@@ -78,6 +78,40 @@ class CorrelationMonitor:
         # Note: If USDJPY rises, Dollar is Strong.
         return [data.get(self.usd_symbol, 0.0), data.get(self.risk_symbol, 0.0)]
 
+    def get_macro_state_checked(self) -> Tuple[Optional[List[float]], bool, str]:
+        """Return macro vector only when underlying ticks are available.
+
+        This is intended for *strict entry gating*: if correlations are enabled but
+        proxy symbols have no ticks, we return ok=False instead of defaulting to 0.0.
+        """
+        if not self.initialized:
+            return None, False, "Macro eye not initialized"
+
+        data = {}
+        missing = []
+        for sym in [self.usd_symbol, self.risk_symbol]:
+            try:
+                ticks = mt5.copy_ticks_from(sym, datetime.now(), 10, mt5.COPY_TICKS_ALL)
+                if ticks is None or len(ticks) < 2:
+                    missing.append(sym)
+                    continue
+
+                current = ticks[-1][1]  # bid
+                prev = ticks[0][1]
+                if prev == 0:
+                    missing.append(sym)
+                    continue
+
+                velocity = ((current - prev) / prev) * 10000
+                data[sym] = float(velocity)
+            except Exception:
+                missing.append(sym)
+
+        if missing:
+            return None, False, f"Macro proxies missing ticks: {','.join(missing)}"
+
+        return [data.get(self.usd_symbol, 0.0), data.get(self.risk_symbol, 0.0)], True, "OK"
+
 
 @dataclass
 class MarketRegime:
@@ -157,6 +191,26 @@ class MarketStateManager:
             
             # Calculate returns (absolute price changes)
             prices = self.price_history
+
+    def calculate_bollinger_bands_checked(self, symbol: str, period: int = 20, std_dev: float = 2.0) -> Tuple[Optional[Dict[str, float]], bool, str]:
+        """Bollinger Bands with explicit availability signal (no synthetic zero bands)."""
+        try:
+            candles = self.candles.get_history(symbol)
+            if not candles or len(candles) < period:
+                return None, False, f"Insufficient candles for BB: have={len(candles) if candles else 0} need={period}"
+
+            closes = [float(c['close']) for c in candles[-period:]]
+            sma = sum(closes) / period
+            variance = sum(((x - sma) ** 2) for x in closes) / period
+            std = variance ** 0.5
+            bands = {
+                'upper': sma + (std * std_dev),
+                'middle': sma,
+                'lower': sma - (std * std_dev)
+            }
+            return bands, True, "OK"
+        except Exception as e:
+            return None, False, f"BB error: {e}"
             moves = [abs(prices[i] - prices[i-1]) for i in range(1, len(prices))]
             
             if not moves:
@@ -187,6 +241,48 @@ class CandleManager:
         self._cache_lock = Lock()
         self._cache_timeout = 30  # seconds
 
+    def _timeframe_seconds(self) -> int:
+        tf = (self.timeframe or "M1").upper()
+        return {
+            "M1": 60,
+            "M5": 300,
+            "M15": 900,
+            "M30": 1800,
+            "H1": 3600,
+            "H4": 14400,
+            "D1": 86400,
+        }.get(tf, 60)
+
+    def _normalize_candles(self, candles: List[Dict], *, drop_incomplete: bool = True) -> List[Dict]:
+        """Return candles sorted ascending by time; optionally drop the still-forming bar."""
+        if not candles:
+            return []
+        if not isinstance(candles[0], dict) or 'time' not in candles[0]:
+            return candles
+
+        # Normalize epoch units (some brokers return ms timestamps)
+        for c in candles:
+            try:
+                ts = int(c.get('time', 0) or 0)
+                if ts > 10_000_000_000:
+                    c['time'] = int(ts / 1000)
+            except Exception:
+                pass
+
+        candles_sorted = sorted(candles, key=lambda c: int(c.get('time', 0)))
+
+        if not drop_incomplete or not candles_sorted:
+            return candles_sorted
+
+        tf_sec = self._timeframe_seconds()
+        now = time.time()
+        last_time = int(candles_sorted[-1].get('time', 0))
+        # MT5 bars are timestamped at the bar OPEN; if now is before bar close, it's still forming.
+        if last_time > 0 and now < (last_time + tf_sec):
+            return candles_sorted[:-1]
+
+        return candles_sorted
+
     def get_history(self, symbol: str, force_refresh: bool = False) -> List[Dict]:
         """
         Get recent price history for trading decisions.
@@ -214,6 +310,9 @@ class CandleManager:
             if not candles:
                 logger.warning(f"No candle data received for {symbol}")
                 return []
+
+            # Normalize ordering and remove incomplete candle to prevent lookahead bias
+            candles = self._normalize_candles(candles, drop_incomplete=True)
 
             # Cache the result
             with self._cache_lock:
@@ -274,6 +373,8 @@ class MarketDataManager:
         # HFT: Order Book Imbalance Cache
         self.last_obi = 0.0
         self.last_obi_time = 0.0
+        self.last_obi_applicable = bool(hasattr(broker_adapter, 'get_order_book'))
+        self.last_obi_ok = False
 
         # [PHASE 1] Initialize Correlation Monitor
         self.macro_eye = None
@@ -293,9 +394,133 @@ class MarketDataManager:
             return self.macro_eye.get_macro_state()
         return [0.0, 0.0]
 
-    def calculate_trend_strength(self, symbol: str) -> float:
+    def get_macro_context_checked(self) -> Tuple[Optional[List[float]], bool, str]:
+        """Get macro context with an explicit availability signal.
+
+        Returns:
+            (vector, ok, reason)
+
+        Notes:
+        - If correlations are disabled (no macro_eye), ok=True and vector=None.
+        - If correlations are enabled but proxy ticks are missing, ok=False.
         """
-        Calculates the strength of the current trend.
+        if not self.macro_eye:
+            return None, True, "Correlations disabled"
+
+        try:
+            vec, ok, reason = self.macro_eye.get_macro_state_checked()
+            return vec, ok, reason
+        except Exception as e:
+            return None, False, f"Macro context error: {e}"
+
+    def calculate_atr_checked(self, symbol: str, period: int = 14) -> Tuple[Optional[float], bool, str]:
+        """ATR with explicit availability signal.
+
+        Intended for strict entry gating to avoid using synthetic fallbacks.
+        """
+        try:
+            candles = self.candles.get_history(symbol)
+            if not candles or len(candles) < period + 1:
+                return None, False, f"Insufficient candles for ATR: have={len(candles) if candles else 0} need={period + 1}"
+
+            true_ranges = []
+            for i in range(1, len(candles)):
+                current = candles[i]
+                previous = candles[i - 1]
+
+                tr1 = current['high'] - current['low']
+                tr2 = abs(current['high'] - previous['close'])
+                tr3 = abs(current['low'] - previous['close'])
+                true_ranges.append(max(tr1, tr2, tr3))
+
+            if len(true_ranges) < period:
+                return None, False, f"Insufficient TR series for ATR: have={len(true_ranges)} need={period}"
+
+            atr = float(sum(true_ranges[-period:]) / period)
+            if atr <= 0.0:
+                return None, False, "ATR non-positive"
+            return atr, True, "OK"
+        except Exception as e:
+            return None, False, f"ATR error: {e}"
+
+    def calculate_rsi_checked(self, symbol: str, period: int = 14) -> Tuple[Optional[float], bool, str]:
+        """RSI with explicit availability signal (no neutral fallback)."""
+        try:
+            candles = self.candles.get_history(symbol)
+            if not candles or len(candles) < period + 1:
+                return None, False, f"Insufficient candles for RSI: have={len(candles) if candles else 0} need={period + 1}"
+
+            gains = []
+            losses = []
+            for i in range(1, len(candles)):
+                change = candles[i]['close'] - candles[i - 1]['close']
+                if change > 0:
+                    gains.append(change)
+                    losses.append(0.0)
+                else:
+                    gains.append(0.0)
+                    losses.append(abs(change))
+
+            avg_gain = sum(gains[-period:]) / period
+            avg_loss = sum(losses[-period:]) / period
+            if avg_loss == 0:
+                return 100.0, True, "OK"
+
+            rs = avg_gain / avg_loss
+            rsi = float(100 - (100 / (1 + rs)))
+            return rsi, True, "OK"
+        except Exception as e:
+            return None, False, f"RSI error: {e}"
+
+    def calculate_trend_strength_checked(self, symbol: str, period: int = 20) -> Tuple[Optional[float], bool, str]:
+        """Trend strength with explicit availability signal (no synthetic fallback)."""
+        try:
+            strength = self.calculate_trend_strength(symbol, period)
+            # Valid strength is 0..1 in current implementation.
+            if strength is None:
+                return None, False, "Trend strength missing"
+            strength_f = float(strength)
+            if not (0.0 <= strength_f <= 1.0):
+                return None, False, f"Trend strength out of range: {strength_f}"
+            return strength_f, True, "OK"
+        except Exception as e:
+            return None, False, f"Trend strength error: {e}"
+
+    def calculate_trend_direction_checked(self, symbol: str, period: int = 20) -> Tuple[Optional[float], bool, str]:
+        """Signed trend direction with explicit availability signal.
+
+        Returns:
+            (value, ok, reason) where value is in [-1.0, +1.0]
+
+        Notes:
+        - This is direction-aware (negative = down, positive = up).
+        - Intended for veto logic like "don't buy into a crash".
+        """
+        try:
+            candles = self.candles.get_history(symbol)
+            if not candles or len(candles) < max(10, period):
+                return None, False, f"Insufficient candles for trend direction: have={len(candles) if candles else 0} need={max(10, period)}"
+            v = float(self.calculate_trend_direction(symbol))
+            if not (-1.0 <= v <= 1.0):
+                return None, False, f"Trend direction out of range: {v}"
+            return v, True, "OK"
+        except Exception as e:
+            return None, False, f"Trend direction error: {e}"
+
+    def get_volume_z_score_checked(self, symbol: str) -> Tuple[Optional[float], bool, str]:
+        """Volume Z-score with explicit availability signal (no silent 0.0 fallback)."""
+        try:
+            candles = self.candles.get_history(symbol)
+            if not candles or len(candles) < 51:
+                return None, False, f"Insufficient candles for vol_z: have={len(candles) if candles else 0} need=51"
+            z = float(self.get_volume_z_score(symbol))
+            return z, True, "OK"
+        except Exception as e:
+            return None, False, f"vol_z error: {e}"
+
+    def calculate_trend_direction(self, symbol: str) -> float:
+        """
+        Calculates a signed direction-aware trend score.
         Returns:
             float: -1.0 (Strong Downtrend) to +1.0 (Strong Uptrend)
         """
@@ -384,6 +609,37 @@ class MarketDataManager:
             # logger.error(f"OBI Calculation failed: {e}") # Suppress spam
             return 0.0
 
+    def get_order_book_imbalance_checked(self, symbol: str) -> Tuple[Optional[float], bool, str]:
+        """Order book imbalance with explicit availability signal.
+
+        Returns:
+            (obi, ok, reason)
+
+        Notes:
+        - ok=True only when an order-book-derived value is available.
+        - If the broker does not support order books, ok=False and obi=None.
+        - If the broker supports order books but no book is returned, ok=False.
+        """
+        try:
+            if not hasattr(self.broker, 'get_order_book'):
+                return None, False, "OBI not supported"
+
+            book = self.broker.get_order_book(symbol)
+            if not book:
+                return None, False, "Order book unavailable"
+
+            bids = book.get('bids', []) or []
+            asks = book.get('asks', []) or []
+            total_bid_vol = float(sum(item.get('volume', 0) for item in bids))
+            total_ask_vol = float(sum(item.get('volume', 0) for item in asks))
+            if total_bid_vol + total_ask_vol <= 0:
+                return None, False, "Order book empty"
+
+            obi = (total_bid_vol - total_ask_vol) / (total_bid_vol + total_ask_vol)
+            return float(obi), True, "OK"
+        except Exception as e:
+            return None, False, f"OBI error: {e}"
+
     def get_symbol_properties(self, symbol: str) -> Dict[str, Any]:
         """
         Get standardized properties for a symbol.
@@ -427,7 +683,52 @@ class MarketDataManager:
                 logger.warning(f"Invalid tick data received for {symbol}")
                 return None
 
+            # Normalize tick timestamp (seconds vs milliseconds)
+            try:
+                raw_ts = tick.get('time', 0) or 0
+                ts = float(raw_ts)
+                if ts > 10_000_000_000:
+                    ts = ts / 1000.0
+                tick['time'] = float(ts) if ts > 0 else 0.0
+            except Exception:
+                tick['time'] = 0.0
+
             current_time = time.time()
+
+            # Freshness metrics (for gating NEW orders)
+            try:
+                tick_ts = float(tick.get('time', 0.0) or 0.0)
+                tick_age_s = abs(current_time - tick_ts) if tick_ts > 0 else float('inf')
+            except Exception:
+                tick_age_s = float('inf')
+
+            tf_s = 60
+            try:
+                tf_s = int(self.candles._timeframe_seconds())
+            except Exception:
+                tf_s = 60
+
+            candle_close_age_s = float('inf')
+            candle_close_ts = 0.0
+            try:
+                latest = self.candles.get_latest_candle(symbol)
+                if latest and isinstance(latest, dict):
+                    c_ts = float(latest.get('time', 0) or 0)
+                    if c_ts > 10_000_000_000:
+                        c_ts = c_ts / 1000.0
+                    if c_ts > 0:
+                        candle_close_ts = float(c_ts) + float(tf_s)
+                        candle_close_age_s = current_time - candle_close_ts
+                        if candle_close_age_s < 0:
+                            candle_close_age_s = 0.0
+            except Exception:
+                candle_close_age_s = float('inf')
+                candle_close_ts = 0.0
+
+            tick['tick_age_s'] = float(tick_age_s)
+            tick['candle_close_age_s'] = float(candle_close_age_s)
+            tick['candle_close_ts'] = float(candle_close_ts)
+            tick['timeframe_s'] = int(tf_s)
 
             # Update market state
             if 'bid' in tick and 'ask' in tick:
@@ -437,11 +738,20 @@ class MarketDataManager:
 
             # HFT: Update Order Book Imbalance (every 1s to avoid API spam)
             if current_time - self.last_obi_time > 1.0:
-                self.last_obi = self.get_order_book_imbalance(symbol)
+                obi_applicable = hasattr(self.broker, 'get_order_book')
+                self.last_obi_applicable = bool(obi_applicable)
+                obi_val, obi_ok, _ = self.get_order_book_imbalance_checked(symbol)
+
+                # Keep numeric cache for downstream consumers, but expose ok/applicable flags
+                # so entry logic can avoid treating missing OBI as a real 0.0 signal.
+                self.last_obi_ok = bool(obi_ok)
+                self.last_obi = float(obi_val) if (obi_val is not None and obi_ok) else 0.0
                 self.last_obi_time = current_time
             
             # Inject OBI into tick data for downstream logic
             tick['obi'] = self.last_obi
+            tick['obi_ok'] = bool(getattr(self, 'last_obi_ok', False))
+            tick['obi_applicable'] = bool(getattr(self, 'last_obi_applicable', False))
 
             return tick
 

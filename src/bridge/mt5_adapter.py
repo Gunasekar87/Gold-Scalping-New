@@ -8,6 +8,8 @@ from typing import Dict, Optional
 import logging
 import os
 import math
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger("MT5Adapter")
 
@@ -16,6 +18,11 @@ class MT5Adapter(BrokerAdapter):
         self.login = int(login) if login else None
         self.password = password
         self.server = server
+
+        # Persistent close executor to avoid per-batch threadpool startup overhead.
+        self._close_executor: Optional[ThreadPoolExecutor] = None
+        self._close_executor_max_workers: int = 0
+        self._close_executor_lock = threading.Lock()
 
     def connect(self) -> bool:
         if mt5 is None:
@@ -121,7 +128,34 @@ class MT5Adapter(BrokerAdapter):
             }
         return None
 
-    def execute_order(self, symbol, action, volume, order_type, price=None, sl=0.0, tp=0.0, magic=0, comment="", ticket=None) -> Dict:
+    def execute_order(self, symbol, action, volume, order_type, price=None, sl=0.0, tp=0.0, magic=0, comment="", ticket=None, **kwargs) -> Dict:
+        strict_entry = bool(kwargs.get('strict_entry', False) or getattr(self, 'strict_entry', False))
+        strict_ok = kwargs.get('strict_ok', None)
+        trace_enabled = str(os.getenv("AETHER_DECISION_TRACE", "1")).strip().lower() in ("1", "true", "yes", "on")
+        atr_ok = kwargs.get('atr_ok', None)
+        rsi_ok = kwargs.get('rsi_ok', None)
+        obi_ok = kwargs.get('obi_ok', None)
+        trace_reason = kwargs.get('trace_reason', None)
+
+        if trace_enabled:
+            logger.info(
+                self._format_decision_trace(
+                    action=action,
+                    symbol=symbol,
+                    ticket=ticket,
+                    strict_entry=strict_entry,
+                    strict_ok=strict_ok,
+                    atr_ok=atr_ok,
+                    rsi_ok=rsi_ok,
+                    obi_ok=obi_ok,
+                    reason=trace_reason,
+                )
+            )
+        if strict_entry and action == "OPEN" and strict_ok is not True:
+            msg = f"STRICT_BLOCK: OPEN rejected (strict_ok={strict_ok}) symbol={symbol}"
+            logger.warning(f"[MT5] {msg}")
+            return {"ticket": None, "retcode": -1, "comment": msg}
+
         # ... existing logic from order_execution.py ...
         # This is where we wrap the specific MT5 code
         mt5_type = mt5.ORDER_TYPE_BUY if order_type == "BUY" else mt5.ORDER_TYPE_SELL
@@ -200,10 +234,12 @@ class MT5Adapter(BrokerAdapter):
                 type=p.type, # 0=BUY, 1=SELL
                 volume=p.volume,
                 price_open=p.price_open,
+                price_current=p.price_current,
                 sl=p.sl,
                 tp=p.tp,
                 profit=p.profit,
                 swap=p.swap,
+                commission=getattr(p, 'commission', 0.0), # [FIX] Capture commission if available
                 comment=p.comment,
                 time=p.time,
                 magic=p.magic
@@ -276,7 +312,53 @@ class MT5Adapter(BrokerAdapter):
         # Apply safety buffer (95% of max)
         return max_vol * 0.95
 
-    async def close_positions(self, positions_data: list) -> dict:
+    def get_order_book(self, symbol: str) -> dict:
+        """Return Depth of Market in a simple dict format.
+
+        Format:
+            {
+              'bids': [{'price': float, 'volume': float}, ...],
+              'asks': [{'price': float, 'volume': float}, ...]
+            }
+
+        Notes:
+        - Requires broker/terminal to support Market Book (Level 2).
+        - Returns empty dict if unavailable.
+        """
+        if not symbol:
+            return {}
+
+        try:
+            # Subscribe once per call; MT5 will ignore if already subscribed.
+            try:
+                mt5.market_book_add(symbol)
+            except Exception:
+                pass
+
+            book = mt5.market_book_get(symbol)
+            if not book:
+                return {}
+
+            bids = []
+            asks = []
+            for row in book:
+                rtype = getattr(row, 'type', None)
+                price = float(getattr(row, 'price', 0.0) or 0.0)
+                vol = float(getattr(row, 'volume', 0.0) or 0.0)
+                if price <= 0 or vol <= 0:
+                    continue
+
+                # Most MT5 builds: 0=BUY (bid), 1=SELL (ask)
+                if rtype == 0:
+                    bids.append({'price': price, 'volume': vol})
+                elif rtype == 1:
+                    asks.append({'price': price, 'volume': vol})
+
+            return {'bids': bids, 'asks': asks}
+        except Exception:
+            return {}
+
+    async def close_positions(self, positions_data: list, trace: Optional[Dict] = None) -> dict:
         """
         ZERO-LATENCY CLOSER: Accepts full position objects/dicts to skip the lookup step.
         Executes 'Blind' close commands for maximum speed.
@@ -285,10 +367,54 @@ class MT5Adapter(BrokerAdapter):
             return {}
             
         import asyncio
+
+        def _ensure_close_executor(max_workers: int) -> ThreadPoolExecutor:
+            with self._close_executor_lock:
+                if self._close_executor is None or self._close_executor_max_workers != max_workers:
+                    if self._close_executor is not None:
+                        try:
+                            self._close_executor.shutdown(wait=False, cancel_futures=True)
+                        except Exception:
+                            pass
+                    self._close_executor_max_workers = max_workers
+                    self._close_executor = ThreadPoolExecutor(
+                        max_workers=max_workers,
+                        thread_name_prefix="mt5close",
+                    )
+                return self._close_executor
+
+        def _supports_close_by() -> bool:
+            # CLOSE_BY works only on hedging accounts.
+            # On netting/exchange accounts it will fail; we skip to avoid extra latency.
+            try:
+                info = mt5.account_info()
+                if not info:
+                    return False
+                return getattr(info, 'margin_mode', None) == getattr(mt5, 'ACCOUNT_MARGIN_MODE_RETAIL_HEDGING', 1)
+            except Exception:
+                return False
+
+        # Prefetch latest ticks per symbol once to reduce per-thread overhead.
+        # Retried attempts still refresh ticks.
+        tick_cache = {}
+        try:
+            symbols = {
+                (p.symbol if hasattr(p, 'symbol') else p.get('symbol'))
+                for p in positions_data
+            }
+            for sym in symbols:
+                if sym:
+                    tick_cache[sym] = mt5.symbol_info_tick(sym)
+        except Exception:
+            tick_cache = {}
         
         # Define a wrapper to close a single ticket with retries
-        def close_single_sync(pos):
+        trace_enabled = str(os.getenv("AETHER_DECISION_TRACE", "1")).strip().lower() in ("1", "true", "yes", "on")
+        trace_dict = trace if isinstance(trace, dict) else {}
+
+        def close_single_sync(pos, pre_tick=None):
             # [OPTIMIZATION] No mt5.positions_get() call here. We trust the data passed in.
+            import time
             
             # Handle both object (dot notation) and dict (bracket notation)
             try:
@@ -301,49 +427,104 @@ class MT5Adapter(BrokerAdapter):
                 logger.error(f"Invalid position data for close: {e}")
                 return {"ticket": -1, "retcode": -1, "comment": f"Invalid data: {e}"}
 
+            # Optional override for the CLOSE comment (not the original position comment).
+            # We keep this short because MT5 imposes strict comment length limits.
+            close_comment = None
+            if isinstance(pos, dict):
+                close_comment = pos.get('close_comment')
+
             # Determine close type (Opposite of open)
             order_type = mt5.ORDER_TYPE_SELL if p_type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
             
+            # CRITICAL: Normalize volume for partial closes
+            # If volume is not normalized, MT5 might reject it or round it unpredictably
+            normalized_volume = self.normalize_lot_size(symbol, volume)
+            
             # Get current price (Fastest way)
-            tick = mt5.symbol_info_tick(symbol)
+            tick = pre_tick or mt5.symbol_info_tick(symbol)
             if not tick: 
                 return {"ticket": ticket, "retcode": -1, "comment": "No tick data"}
                 
             price = tick.bid if order_type == mt5.ORDER_TYPE_SELL else tick.ask
 
-            # [OPTIMIZATION] Dynamic Deviation for Fast Closing
-            # Gold moves fast, so we need wider tolerance to avoid Requotes (Latency)
-            dev = 50
-            if "XAU" in symbol or "GOLD" in symbol:
-                dev = 500 # 50 pips tolerance for Gold (Priority: EXECUTION SPEED)
-            elif "JPY" in symbol:
-                dev = 100 # 10 pips for JPY pairs
-
             request = {
                 "action": mt5.TRADE_ACTION_DEAL,
                 "symbol": symbol,
-                "volume": volume,
+                "volume": normalized_volume, # Use normalized volume
                 "type": order_type,
                 "position": ticket,
                 "price": price,
-                "deviation": dev,
+                # Deviation is set per-attempt below (tight first, widen on retries)
                 "magic": magic,
-                "comment": "Aether FastClose",
+                "comment": close_comment or "Aether FastClose",
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": mt5.ORDER_FILLING_IOC,
             }
 
+            if trace_enabled:
+                logger.info(
+                    self._format_decision_trace(
+                        action="CLOSE",
+                        symbol=symbol,
+                        ticket=ticket,
+                        strict_entry=bool(trace_dict.get('strict_entry', False)),
+                        strict_ok=trace_dict.get('strict_ok', None),
+                        atr_ok=trace_dict.get('atr_ok', None),
+                        rsi_ok=trace_dict.get('rsi_ok', None),
+                        obi_ok=trace_dict.get('obi_ok', None),
+                        reason=trace_dict.get('reason', None),
+                    )
+                )
+
             # BLAST THE ORDER - Retry loop
             for attempt in range(3):
+                # Adaptive deviation to reduce slippage:
+                # - start tight to protect profits
+                # - widen only if we get requotes/price errors
+                base_dev = 50
+                if "XAU" in symbol or "GOLD" in symbol:
+                    base_dev = int(os.getenv("AETHER_CLOSE_DEVIATION_XAU", "180"))
+                elif "JPY" in symbol:
+                    base_dev = int(os.getenv("AETHER_CLOSE_DEVIATION_JPY", "120"))
+                else:
+                    base_dev = int(os.getenv("AETHER_CLOSE_DEVIATION_FX", "60"))
+
+                max_dev = int(os.getenv("AETHER_CLOSE_DEVIATION_MAX", "600"))
+                request["deviation"] = min(max_dev, base_dev * (attempt + 1))
+
                 result = mt5.order_send(request)
+
+                if result is None:
+                    # Terminal/API failure. Retry once or twice with backoff.
+                    if attempt == 0:
+                        logger.warning(f"Close retry {ticket}: order_send returned None. Last error: {mt5.last_error()}")
+                    time.sleep(0.25 * (attempt + 1))
+                    continue
                 
                 if result.retcode == mt5.TRADE_RETCODE_DONE:
-                    logger.info(f"[CLOSED] {ticket} at {result.price}")
-                    return {"ticket": ticket, "retcode": result.retcode, "price": result.price}
-                elif result.retcode in [10004, 10015, 10021]: # Requote, Invalid Price, No Money
+                    # Keep hot-path logging minimal; bucket-level code logs results.
+                    logger.debug(f"[CLOSED] {ticket} at {result.price}")
+                    return {
+                        "ticket": ticket,
+                        "retcode": result.retcode,
+                        "price": getattr(result, 'price', None),
+                        "request_price": request.get("price"),
+                        "symbol": symbol,
+                        "volume": normalized_volume,
+                        "type": int(order_type),
+                        "comment": getattr(result, 'comment', '')
+                    }
+                elif result.retcode in [10004, 10015, 10021, 10031]: # Requote, Invalid Price, No Money, No Connection
                     # Only log warning on first failure to keep logs clean
                     if attempt == 0:
                         logger.warning(f"Close retry {ticket}: {result.comment}")
+
+                    # If we lost network/terminal connection, give it a moment.
+                    if result.retcode == 10031:
+                        time.sleep(0.75 * (attempt + 1))
+                    else:
+                        time.sleep(0.15 * (attempt + 1))
+
                     # Refresh price for retry
                     tick = mt5.symbol_info_tick(symbol)
                     if tick:
@@ -351,27 +532,160 @@ class MT5Adapter(BrokerAdapter):
                     continue
                 else:
                     logger.error(f"CRITICAL: Failed to close {ticket}. Error: {result.comment} ({result.retcode})")
-                    return {"ticket": ticket, "retcode": result.retcode, "comment": result.comment}
+                    return {
+                        "ticket": ticket,
+                        "retcode": result.retcode,
+                        "comment": result.comment,
+                        "request_price": request.get("price"),
+                        "symbol": symbol,
+                        "volume": normalized_volume,
+                        "type": int(order_type),
+                    }
             
-            return {"ticket": ticket, "retcode": -1, "comment": "Max retries exceeded"}
+            return {
+                "ticket": ticket,
+                "retcode": -1,
+                "comment": "Max retries exceeded",
+                "request_price": request.get("price"),
+                "symbol": symbol,
+                "volume": normalized_volume,
+                "type": int(order_type),
+            }
+
+        # Optional: CLOSE_BY pairing to reduce spread/slippage and number of close deals.
+        enable_close_by = str(os.getenv("AETHER_ENABLE_CLOSE_BY", "1")).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
 
         # Get the running loop
         loop = asyncio.get_running_loop()
 
-        # Fire ALL close requests at the exact same time using threads
-        # This allows the blocking MT5 calls to run in parallel
-        tasks = [
-            loop.run_in_executor(None, close_single_sync, pos)
-            for pos in positions_data
-        ]
-        
+        # Fire ALL close requests in parallel.
+        # Using a dedicated persistent executor avoids per-batch startup overhead.
+        default_cap = int(os.getenv("AETHER_CLOSE_MAX_WORKERS", "32"))
+        max_workers = max(1, min(len(positions_data), default_cap))
+        executor = _ensure_close_executor(max_workers)
+
+        # Attempt CLOSE_BY for equal-volume opposite hedges (hedging accounts only).
+        # This reduces number of market orders and typically reduces spread impact.
+        close_by_results: Dict[int, Dict] = {}
+        remaining = list(positions_data)
+        if enable_close_by and _supports_close_by():
+            try:
+                # Build per-symbol buy/sell pools (only equal-volume pairs)
+                by_symbol = {}
+                for p in remaining:
+                    sym = p.symbol if hasattr(p, 'symbol') else (p.get('symbol') if isinstance(p, dict) else None)
+                    if not sym:
+                        continue
+                    by_symbol.setdefault(sym, []).append(p)
+
+                def _pos_fields(p):
+                    ticket = p.ticket if hasattr(p, 'ticket') else p['ticket']
+                    symbol = p.symbol if hasattr(p, 'symbol') else p['symbol']
+                    volume = p.volume if hasattr(p, 'volume') else p['volume']
+                    p_type = p.type if hasattr(p, 'type') else p['type']
+                    magic = p.magic if hasattr(p, 'magic') else (p.get('magic', 0) if isinstance(p, dict) else 0)
+                    return ticket, symbol, float(volume), int(p_type), int(magic)
+
+                def close_by_sync(pos_a, pos_b):
+                    # Close BUY/SELL by each other. Only safe for equal-volume pairs.
+                    try:
+                        t1, sym, vol1, type1, magic1 = _pos_fields(pos_a)
+                        t2, _, vol2, type2, magic2 = _pos_fields(pos_b)
+                    except Exception as e:
+                        return {"retcode": -1, "comment": f"close_by invalid data: {e}"}
+
+                    # Must be opposite sides
+                    if type1 == type2:
+                        return {"retcode": -1, "comment": "close_by same side"}
+
+                    # Enforce equal volumes (within step) to avoid partial close-by semantics.
+                    # Use symbol step if available; else a small epsilon.
+                    step = 0.01
+                    try:
+                        info = self.get_symbol_info(sym) or {}
+                        step = float(info.get('volume_step', step))
+                    except Exception:
+                        step = 0.01
+                    eps = max(1e-6, step / 2)
+                    if abs(vol1 - vol2) > eps:
+                        return {"retcode": -1, "comment": "close_by volume mismatch"}
+
+                    req = {
+                        "action": mt5.TRADE_ACTION_CLOSE_BY,
+                        "symbol": sym,
+                        "position": t1,
+                        "position_by": t2,
+                        "magic": magic1,
+                        "comment": "Aether CloseBy"[:31],
+                    }
+                    res = mt5.order_send(req)
+                    if res is None:
+                        return {"retcode": -1, "comment": f"close_by None: {mt5.last_error()}"}
+                    return {"retcode": res.retcode, "comment": getattr(res, 'comment', '')}
+
+                close_by_tasks = []
+                paired_tickets = set()
+                for sym, plist in by_symbol.items():
+                    buys = [p for p in plist if (p.type if hasattr(p, 'type') else p.get('type')) == mt5.ORDER_TYPE_BUY]
+                    sells = [p for p in plist if (p.type if hasattr(p, 'type') else p.get('type')) == mt5.ORDER_TYPE_SELL]
+
+                    # Pair greedily by equal normalized volume
+                    # (we only attempt when volumes match closely)
+                    used_sells = set()
+                    for b in buys:
+                        bt, _, bv, _, _ = _pos_fields(b)
+                        if bt in paired_tickets:
+                            continue
+                        match = None
+                        for s in sells:
+                            st, _, sv, _, _ = _pos_fields(s)
+                            if st in used_sells or st in paired_tickets:
+                                continue
+                            if abs(bv - sv) <= 1e-6:
+                                match = s
+                                used_sells.add(st)
+                                break
+                        if match:
+                            st, _, _, _, _ = _pos_fields(match)
+                            paired_tickets.add(bt)
+                            paired_tickets.add(st)
+                            close_by_tasks.append(loop.run_in_executor(executor, close_by_sync, b, match))
+
+                if close_by_tasks:
+                    close_by_task_results = await asyncio.gather(*close_by_tasks)
+                    # Map results back: since close_by_sync doesn't include tickets, we conservatively just mark paired
+                    # tickets as "handled" only if retcode DONE.
+                    # Any failures will fall back to standard close.
+                    # NOTE: We don't know which result corresponds to which pair here without extra bookkeeping.
+                    # Keep this simple: if close_by was used, we will rely on subsequent broker sync to remove closed.
+                    # To avoid skipping closes incorrectly, we won't remove from remaining unless we can verify.
+                    # We still return a marker in result map for audit.
+                    for r in close_by_task_results:
+                        # No ticket mapping; include as informational
+                        pass
+
+                    # If close_by tasks were issued, we do not assume success for any specific ticket.
+                    # We simply proceed with standard closes; MT5 will return "position doesn't exist" for already closed.
+                    # This keeps correctness.
+            except Exception as e:
+                logger.debug(f"[CLOSE_BY] Skipped due to error: {e}")
+
+        tasks = []
+        for pos in remaining:
+            sym = pos.symbol if hasattr(pos, 'symbol') else (pos.get('symbol') if isinstance(pos, dict) else None)
+            tasks.append(loop.run_in_executor(executor, close_single_sync, pos, tick_cache.get(sym)))
         results = await asyncio.gather(*tasks)
         
         # Map results back to tickets (extract ticket from position data)
         tickets = [p.ticket if hasattr(p, 'ticket') else p['ticket'] for p in positions_data]
         return {ticket: result for ticket, result in zip(tickets, results)}
 
-    async def close_position(self, ticket: int, volume: float = None) -> bool:
+    async def close_position(self, ticket: int, volume: float = None, trace: Optional[Dict] = None) -> bool:
         """
         Close a single position by ticket.
         Wrapper around close_positions for single ticket convenience.
@@ -393,24 +707,24 @@ class MT5Adapter(BrokerAdapter):
             
         # If volume is specified, we need to create a copy of the position data with the new volume
         if volume:
-             # Create a dict representation with the override volume
-             # Note: target_pos might be an object or dict. Handle both.
-             t_ticket = target_pos.ticket if hasattr(target_pos, 'ticket') else target_pos['ticket']
-             t_symbol = target_pos.symbol if hasattr(target_pos, 'symbol') else target_pos['symbol']
-             t_type = target_pos.type if hasattr(target_pos, 'type') else target_pos['type']
-             t_magic = target_pos.magic if hasattr(target_pos, 'magic') else target_pos['magic']
-             
-             pos_data = {
-                 'ticket': t_ticket,
-                 'symbol': t_symbol,
-                 'volume': volume, # OVERRIDE
-                 'type': t_type,
-                 'magic': t_magic
-             }
-             # Use close_positions with this single item
-             result = await self.close_positions([pos_data])
+            # Create a dict representation with the override volume
+            # Note: target_pos might be an object or dict. Handle both.
+            t_ticket = target_pos.ticket if hasattr(target_pos, 'ticket') else target_pos['ticket']
+            t_symbol = target_pos.symbol if hasattr(target_pos, 'symbol') else target_pos['symbol']
+            t_type = target_pos.type if hasattr(target_pos, 'type') else target_pos['type']
+            t_magic = target_pos.magic if hasattr(target_pos, 'magic') else (target_pos.get('magic', 0) if isinstance(target_pos, dict) else 0)
+
+            pos_data = {
+                'ticket': t_ticket,
+                'symbol': t_symbol,
+                'volume': volume,  # OVERRIDE
+                'type': t_type,
+                'magic': t_magic,
+            }
+            # Use close_positions with this single item
+            result = await self.close_positions([pos_data], trace=trace)
         else:
-             result = await self.close_positions([target_pos])
+            result = await self.close_positions([target_pos], trace=trace)
         
         # Check result
         if ticket in result:
@@ -418,6 +732,40 @@ class MT5Adapter(BrokerAdapter):
             return res.get('retcode') == mt5.TRADE_RETCODE_DONE
             
         return False
+
+    @staticmethod
+    def _format_decision_trace(
+        action: str,
+        symbol: str,
+        ticket: Optional[int],
+        strict_entry: bool,
+        strict_ok,
+        atr_ok,
+        rsi_ok,
+        obi_ok,
+        reason: Optional[str] = None,
+    ) -> str:
+        def _fmt_flag(v) -> str:
+            if v is None:
+                return "NA"
+            if isinstance(v, bool):
+                return "1" if v else "0"
+            try:
+                return "1" if bool(v) else "0"
+            except Exception:
+                return "NA"
+
+        ticket_str = str(ticket) if ticket is not None else "NA"
+        reason_s = str(reason) if (reason is not None and str(reason).strip()) else ""
+        if len(reason_s) > 48:
+            reason_s = reason_s[:48]
+
+        base = (
+            f"[DECISION_TRACE] action={action} symbol={symbol} ticket={ticket_str} "
+            f"strict_entry={_fmt_flag(strict_entry)} strict_ok={_fmt_flag(strict_ok)} "
+            f"atr_ok={_fmt_flag(atr_ok)} rsi_ok={_fmt_flag(rsi_ok)} obi_ok={_fmt_flag(obi_ok)}"
+        )
+        return base + (f" reason={reason_s}" if reason_s else "")
 
     def is_trade_allowed(self) -> bool:
         info = mt5.terminal_info()
@@ -459,9 +807,21 @@ class MT5Adapter(BrokerAdapter):
         except Exception:
             precision = 2
 
-        # Round to nearest volume_step (Standard Rounding)
-        # Example: 0.1195 / 0.01 = 11.95 -> round(11.95) = 12 -> 12 * 0.01 = 0.12
-        normalized = round(round(requested_lot / volume_step) * volume_step, precision)
+        # Normalize to volume_step.
+        # Default is ROUND-DOWN (safer): never increases exposure vs requested_lot.
+        # Override with AETHER_LOT_NORMALIZE_MODE=nearest if you prefer standard rounding.
+        mode = str(os.getenv("AETHER_LOT_NORMALIZE_MODE", "down")).strip().lower()
+
+        epsilon = 1e-12  # protect against floating point edge cases
+        if mode in ("nearest", "round", "standard"):
+            normalized = round(round(requested_lot / volume_step) * volume_step, precision)
+        else:
+            steps = math.floor((requested_lot + epsilon) / volume_step)
+            normalized = round(steps * volume_step, precision)
+
+        # Ensure we never drop below broker minimum due to rounding artifacts
+        if normalized < volume_min:
+            normalized = round(volume_min, precision)
         
         # Use epsilon for comparison
         epsilon = 0.0000001
@@ -486,3 +846,13 @@ class MT5Adapter(BrokerAdapter):
         if mt5:
             mt5.shutdown()
             logger.info("MT5 Disconnected")
+
+        # Best-effort shutdown of persistent executor
+        with self._close_executor_lock:
+            if self._close_executor is not None:
+                try:
+                    self._close_executor.shutdown(wait=False, cancel_futures=True)
+                except Exception:
+                    pass
+                self._close_executor = None
+                self._close_executor_max_workers = 0
