@@ -149,6 +149,9 @@ class PositionManager:
         # Ghost tickets (positions that broker reports but don't exist)
         self._ghost_tickets: Set[int] = set()
         
+        # [TIMEZONE AUTO-CORRECTION]
+        self._time_offset: Optional[float] = None
+        
         # [INTELLIGENCE] High Water Mark Memory (Profit Ratchet)
         # Tracks the highest Net PnL seen for each bucket to prevent round-tripping profits
         self.high_water_marks: Dict[str, float] = {}
@@ -503,10 +506,29 @@ class PositionManager:
                 "on",
             )
             if enable_freshness:
+                now = time.time()
+                tick_ts = float(market_data.get('time', 0.0) or 0.0)
+                
+                # [TIMEZONE AUTO-CORRECTION]
+                if self._time_offset is None and tick_ts > 0:
+                    raw_diff = now - tick_ts
+                    if abs(raw_diff) > 600:
+                        self._time_offset = raw_diff
+                        logger.warning(f"[FRESHNESS] Detected Timezone Offset: {self._time_offset:.2f}s. Adjusting...")
+                    else:
+                        self._time_offset = 0.0
+                
+                offset = self._time_offset if self._time_offset is not None else 0.0
+
                 try:
-                    tick_age = float(market_data.get('tick_age_s', float('inf')))
+                    if tick_ts > 0:
+                        adjusted_ts = tick_ts + offset
+                        tick_age = abs(now - adjusted_ts)
+                    else:
+                        tick_age = float(market_data.get('tick_age_s', float('inf')))
                 except Exception:
                     tick_age = float('inf')
+
                 try:
                     candle_close_age = float(market_data.get('candle_close_age_s', float('inf')))
                 except Exception:
@@ -528,7 +550,7 @@ class PositionManager:
                     max_candle_age = max((2.0 * tf_s) + 10.0, 30.0)
 
                 if max_tick_age > 0 and tick_age > max_tick_age:
-                    logger.warning(f"[FRESHNESS] Calculated recovery blocked: stale tick age={tick_age:.2f}s max={max_tick_age:.2f}s")
+                    logger.warning(f"[FRESHNESS] Calculated recovery blocked: stale tick age={tick_age:.2f}s max={max_tick_age:.2f}s (offset={offset:.2f}s)")
                     return False
                 if max_candle_age > 0 and candle_close_age > max_candle_age:
                     logger.warning(f"[FRESHNESS] Calculated recovery blocked: stale candle close age={candle_close_age:.2f}s max={max_candle_age:.2f}s")
@@ -827,7 +849,7 @@ class PositionManager:
                 PositionState.SINGLE_ACTIVE: [PositionState.TRANSITIONING, PositionState.PENDING_CLOSE, PositionState.CLOSED],
                 PositionState.TRANSITIONING: [PositionState.BUCKET_ACTIVE, PositionState.SINGLE_ACTIVE],  # Rollback on failure
                 PositionState.BUCKET_ACTIVE: [PositionState.PENDING_CLOSE, PositionState.CLOSED],
-                PositionState.PENDING_CLOSE: [PositionState.CLOSED],
+                PositionState.PENDING_CLOSE: [PositionState.CLOSED, PositionState.BUCKET_ACTIVE, PositionState.SINGLE_ACTIVE],
             }
             
             allowed = valid_transitions.get(old_state, [])

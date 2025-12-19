@@ -1,4 +1,4 @@
-﻿@echo off
+@echo off
 REM AETHER Trading System - Quick Start
 REM Version 5.5.3
 
@@ -55,3 +55,4 @@ echo.
 python run_bot.py 3600
 
 pause
+

@@ -348,10 +348,10 @@ class MT5Adapter(BrokerAdapter):
                 if price <= 0 or vol <= 0:
                     continue
 
-                # Most MT5 builds: 0=BUY (bid), 1=SELL (ask)
-                if rtype == 0:
+                # MT5 Constants: 1=SELL (Ask), 2=BUY (Bid)
+                if rtype == 2: # BOOK_TYPE_BUY
                     bids.append({'price': price, 'volume': vol})
-                elif rtype == 1:
+                elif rtype == 1: # BOOK_TYPE_SELL
                     asks.append({'price': price, 'volume': vol})
 
             return {'bids': bids, 'asks': asks}

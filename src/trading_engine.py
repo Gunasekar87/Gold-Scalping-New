@@ -159,7 +159,7 @@ class TradingEngine:
             "on",
         )
         self._strict_entry_min_candles = int(os.getenv("AETHER_STRICT_ENTRY_MIN_CANDLES", "60"))
-        self._strict_tick_max_age_s = float(os.getenv("AETHER_STRICT_TICK_MAX_AGE_S", "2.5"))
+        self._strict_tick_max_age_s = float(os.getenv("AETHER_STRICT_TICK_MAX_AGE_S", "5.0"))
 
         # Freshness gate for ANY NEW order (entry/hedge/recovery)
         self._freshness_gate = str(os.getenv("AETHER_ENABLE_FRESHNESS_GATE", "1")).strip().lower() in (
@@ -181,6 +181,7 @@ class TradingEngine:
         )
         self._last_freshness_ok: Optional[bool] = None
         self._last_freshness_trace_ts: float = 0.0
+        self._time_offset: Optional[float] = None  # Auto-detected timezone offset
 
         # Optional data provenance trace (tick/candles/OBI availability) for live verification
         self._data_provenance_trace = str(os.getenv("AETHER_DATA_PROVENANCE_TRACE", "0")).strip().lower() in (
@@ -257,14 +258,33 @@ class TradingEngine:
         if not self._freshness_gate:
             return True, "disabled"
 
-        now = time.time()
+        max_tick = float(self._fresh_tick_max_age_s) if self._fresh_tick_max_age_s else 0.0
+        max_candle = self._get_fresh_candle_close_max_age_s()
 
+        now = time.time()
+        tick_ts = float(tick.get('time', 0.0) or 0.0)
+
+        # [TIMEZONE AUTO-CORRECTION]
+        if self._time_offset is None and tick_ts > 0:
+            raw_diff = now - tick_ts
+            # If diff is > 10 mins (600s), assume timezone/clock skew and compensate
+            if abs(raw_diff) > 600:
+                self._time_offset = raw_diff
+                logger.warning(f"[FRESHNESS] Detected Timezone Offset: {self._time_offset:.2f}s. Adjusting...")
+            else:
+                self._time_offset = 0.0
+        
+        offset = self._time_offset if self._time_offset is not None else 0.0
+        
         try:
-            tick_age = float(tick.get('tick_age_s', float('inf')))
-            if tick_age == float('inf'):
-                tick_ts = float(tick.get('time', 0.0) or 0.0)
-                tick_age = abs(now - tick_ts) if tick_ts > 0 else float('inf')
-        except Exception:
+            # Recalculate age with offset - PRIORITIZE THIS over tick.get('tick_age_s')
+            if tick_ts > 0:
+                adjusted_ts = tick_ts + offset
+                tick_age = abs(now - adjusted_ts)
+            else:
+                tick_age = float(tick.get('tick_age_s', float('inf')))
+        except Exception as e:
+            logger.error(f"[FRESHNESS_ERROR] {e}")
             tick_age = float('inf')
 
         try:
@@ -272,11 +292,8 @@ class TradingEngine:
         except Exception:
             candle_close_age = float('inf')
 
-        max_tick = float(self._fresh_tick_max_age_s) if self._fresh_tick_max_age_s else 0.0
-        max_candle = self._get_fresh_candle_close_max_age_s()
-
         if max_tick > 0 and tick_age > max_tick:
-            return False, f"stale_tick age={tick_age:.2f}s max={max_tick:.2f}s"
+            return False, f"stale_tick age={tick_age:.2f}s max={max_tick:.2f}s (offset={offset:.2f}s)"
         if max_candle > 0 and candle_close_age > max_candle:
             return False, f"stale_candle_close age={candle_close_age:.2f}s max={max_candle:.2f}s"
 
@@ -850,6 +867,19 @@ class TradingEngine:
 
                 # Record learning data with entry TP/SL metadata
                 ticket = result['ticket']
+
+                # Risk intelligence calculations (AI-Adjusted)
+                # OPTIMIZED GAPS: Linear expansion to prevent tight whipsaws in Hedge 2
+                # Ask PPO for dynamic zone modifier to align Plan with Execution
+                zone_mod = 1.0
+                if self.ppo_guardian:
+                    try:
+                        # Use 0 drawdown for initial plan
+                        _, zone_mod = self.ppo_guardian.get_dynamic_zone(0.0, atr_value, trend_strength, nexus_conf)
+                    except Exception as e:
+                        logger.warning(f"[PPO] Failed to get dynamic zone: {e}")
+                        zone_mod = 1.0
+
                 self.position_manager.record_learning_trade(ticket, signal.symbol, {
                     "symbol": signal.symbol,
                     "type": order_type,
@@ -878,18 +908,6 @@ class TradingEngine:
                     atr_pips = atr_value * 100  # JPY and Gold pairs use 2 decimal places
                 else:
                     atr_pips = atr_value * 10000  # Major forex pairs use 4 decimal places
-
-                # Risk intelligence calculations (AI-Adjusted)
-                # OPTIMIZED GAPS: Linear expansion to prevent tight whipsaws in Hedge 2
-                # Ask PPO for dynamic zone modifier to align Plan with Execution
-                zone_mod = 1.0
-                if self.ppo_guardian:
-                    try:
-                        # Use 0 drawdown for initial plan
-                        _, zone_mod = self.ppo_guardian.get_dynamic_zone(0.0, atr_value, trend_strength, nexus_conf)
-                    except Exception as e:
-                        logger.warning(f"[PPO] Failed to get dynamic zone: {e}")
-                        zone_mod = 1.0
 
                 # Define pip divisor based on symbol for correct price calculation
                 pip_divisor = 100 if "JPY" in symbol or "XAU" in symbol else 10000
@@ -1483,7 +1501,11 @@ class TradingEngine:
             # Get volatility ratio
             volatility_ratio = self.market_data.get_volatility_ratio() if hasattr(self.market_data, 'get_volatility_ratio') else 1.0
 
-            logger.info(f"[ZONE_CHECK] Calling execute_zone_recovery for {symbol} with {len(positions_dict)} positions | ATR: {atr_value:.5f} | VolRatio: {volatility_ratio:.2f}")
+            # Safety check for logging
+            safe_atr = atr_value if atr_value is not None else 0.0
+            safe_vol = volatility_ratio if volatility_ratio is not None else 1.0
+
+            logger.info(f"[ZONE_CHECK] Calling execute_zone_recovery for {symbol} with {len(positions_dict)} positions | ATR: {safe_atr:.5f} | VolRatio: {safe_vol:.2f}")
             zone_recovery_executed = self.risk_manager.execute_zone_recovery(
                 self.broker, symbol, positions_dict, tick, point_value,
                 shield, ppo_guardian, self.position_manager, bool(self._strict_entry), nexus, oracle=oracle, atr_val=atr_value,
@@ -1807,6 +1829,18 @@ class TradingEngine:
             # 2. Supervisor: Select Worker
             worker_name = self.supervisor.get_active_worker(regime)
             
+            # [AI STATUS MONITOR] Store Analysis State for Real-Time Dashboard
+            self.latest_analysis = {
+                'regime': regime.name,
+                'oracle_pred': oracle_prediction,
+                'oracle_conf': oracle_confidence,
+                'pressure': pressure_metrics,
+                'worker': worker_name,
+                'rsi': rsi_value,
+                'atr': atr_value,
+                'timestamp': time.time()
+            }
+            
             # 3. Worker: Generate Signal
             # Prepare context for worker
             market_context = {
@@ -1884,8 +1918,14 @@ class TradingEngine:
                         print(f"[AI THINKING] Regime: {regime.name} | Worker: {worker_name} | Action: HOLD | Reason: {reason}", flush=True)
                 return
             
-            # [DEBUG] Force print signal for debugging
-            print(f"[DEBUG] Signal Generated: {signal.action.value} | Conf: {signal.confidence:.2f} | Reason: {signal.reason}", flush=True)
+            # [AI ENTRY PLAN] Log Detailed Analysis
+            print(f"\n>>> [AI ENTRY SIGNAL] <<<", flush=True)
+            print(f"Signal:       {signal.action.value} (Conf: {signal.confidence:.2f})", flush=True)
+            print(f"Reason:       {signal.reason}", flush=True)
+            print(f"Regime:       {market_regime.name}", flush=True)
+            print(f"Oracle:       {oracle_prediction} ({oracle_confidence:.2f})", flush=True)
+            print(f"Pressure:     {pressure_metrics.get('dominance', 'NEUTRAL')} ({pressure_metrics.get('intensity', 'LOW')})", flush=True)
+            print(f"----------------------------------------------------", flush=True)
 
             # --- CHAMELEON FILTER (SOFT PENALTY) ---
             # Instead of blocking, reduce lot size for Counter-Trend trades
@@ -2255,6 +2295,32 @@ class TradingEngine:
             # 1. Get Live Market Intelligence
             current_atr = self.market_data.calculate_atr(symbol)
             current_rsi = self.market_data.calculate_rsi(symbol)
+            
+            # [AI STATUS MONITOR] Throttled Analysis Update for Dashboard
+            current_time = time.time()
+            if not hasattr(self, '_last_analysis_update'): self._last_analysis_update = 0
+            
+            if current_time - self._last_analysis_update > 5.0: # Update every 5s
+                self._last_analysis_update = current_time
+                
+                # Quick Regime Check
+                supervisor_data = {
+                    'atr': current_atr,
+                    'trend_strength': self.market_data.calculate_trend_strength(symbol),
+                    'volatility_ratio': self.market_data.get_volatility_ratio(),
+                    'macro_context': self.market_data.get_macro_context()
+                }
+                regime = self.supervisor.detect_regime(supervisor_data)
+                
+                # Update Analysis State
+                if not hasattr(self, 'latest_analysis'): self.latest_analysis = {}
+                self.latest_analysis.update({
+                    'regime': regime.name,
+                    'pressure': pressure_metrics,
+                    'rsi': current_rsi,
+                    'atr': current_atr
+                })
+
             if self._strict_entry:
                 try:
                     if hasattr(self.market_data, 'calculate_atr_checked'):
@@ -2298,13 +2364,34 @@ class TradingEngine:
                 pnl_str = f"${bucket_pnl:.2f}"
                 if bucket_pnl > 0: pnl_str = f"+{pnl_str}"
                 
+                # Retrieve latest AI analysis
+                analysis = getattr(self, 'latest_analysis', {})
+                regime = analysis.get('regime', 'ANALYZING')
+                oracle_pred = analysis.get('oracle_pred', 'NEUTRAL')
+                oracle_conf = analysis.get('oracle_conf', 0.0)
+                pressure = analysis.get('pressure', {})
+                
+                # Format Oracle
+                oracle_str = f"{oracle_pred} ({oracle_conf:.2f})" if oracle_pred != "NEUTRAL" else "NEUTRAL"
+                
+                # Format Pressure
+                pressure_str = "BALANCED"
+                if pressure:
+                    dom = pressure.get('dominance', 'NEUTRAL')
+                    intensity = pressure.get('intensity', 'LOW')
+                    pressure_str = f"{dom} ({intensity})"
+
                 rsi_disp = "NA" if current_rsi is None else f"{float(current_rsi):.1f}"
                 atr_disp = "NA" if current_atr is None else f"{float(current_atr):.4f}"
+                
                 status_msg = (
                     f"\n>>> [AI STATUS MONITOR] <<<\n"
                     f"Positions:    {len(symbol_positions)} Active\n"
                     f"Net PnL:      {pnl_str}\n"
                     f"Strategy:     {strategy_status}\n"
+                    f"Regime:       {regime}\n"
+                    f"Oracle:       {oracle_str}\n"
+                    f"Pressure:     {pressure_str}\n"
                     f"Market:       RSI {rsi_disp} | ATR {atr_disp}\n"
                     f"Action:       Holding & Analyzing Tick Data...\n"
                     f"----------------------------------------------------"

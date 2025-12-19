@@ -16,14 +16,16 @@ class NewsFilter:
         """
         Checks if currently in a high-impact news window.
         """
-        now = datetime.datetime.now()
+        # [FIX] Use UTC for consistent market hours regardless of server location
+        now = datetime.datetime.utcnow()
         
-        # 1. BLOCK WEEKENDS (Friday 22:00 to Sunday 22:00)
-        if now.weekday() == 4 and now.hour >= 22: # Friday night
+        # 1. BLOCK WEEKENDS (Friday 21:00 UTC to Sunday 21:00 UTC)
+        # Forex/Gold usually closes ~22:00 UTC Friday and opens ~22:00 UTC Sunday
+        if now.weekday() == 4 and now.hour >= 21: # Friday night (UTC)
             return True
         if now.weekday() == 5: # Saturday
             return True
-        if now.weekday() == 6 and now.hour < 22: # Sunday morning
+        if now.weekday() == 6 and now.hour < 21: # Sunday morning (UTC)
             return True
             
         # 2. BLOCK SPECIFIC HIGH VOLATILITY WINDOWS (UTC)

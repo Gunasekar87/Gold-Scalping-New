@@ -154,6 +154,9 @@ class RiskManager:
         self._global_position_cap = 10
         self._lock = threading.Lock()
         self._last_log_time = 0.0
+        
+        # [TIMEZONE AUTO-CORRECTION]
+        self._time_offset: Optional[float] = None
 
         logger.info(f"RiskManager initialized with zone: {zone_config.zone_pips}pips, TP: {zone_config.tp_pips}pips")
 
@@ -355,10 +358,29 @@ class RiskManager:
             "on",
         )
         if enable_freshness:
+            now = time.time()
+            tick_ts = float(tick.get('time', 0.0) or 0.0)
+            
+            # [TIMEZONE AUTO-CORRECTION]
+            if self._time_offset is None and tick_ts > 0:
+                raw_diff = now - tick_ts
+                if abs(raw_diff) > 600:
+                    self._time_offset = raw_diff
+                    logger.warning(f"[FRESHNESS] Detected Timezone Offset: {self._time_offset:.2f}s. Adjusting...")
+                else:
+                    self._time_offset = 0.0
+            
+            offset = self._time_offset if self._time_offset is not None else 0.0
+
             try:
-                tick_age = float(tick.get('tick_age_s', float('inf')))
+                if tick_ts > 0:
+                    adjusted_ts = tick_ts + offset
+                    tick_age = abs(now - adjusted_ts)
+                else:
+                    tick_age = float(tick.get('tick_age_s', float('inf')))
             except Exception:
                 tick_age = float('inf')
+
             try:
                 candle_close_age = float(tick.get('candle_close_age_s', float('inf')))
             except Exception:
@@ -382,7 +404,7 @@ class RiskManager:
                 max_candle_age = max((2.0 * tf_s) + 10.0, 30.0)
 
             if max_tick_age > 0 and tick_age > max_tick_age:
-                logger.warning(f"[FRESHNESS] Zone recovery blocked: stale tick age={tick_age:.2f}s max={max_tick_age:.2f}s")
+                logger.warning(f"[FRESHNESS] Zone recovery blocked: stale tick age={tick_age:.2f}s max={max_tick_age:.2f}s (offset={offset:.2f}s)")
                 return False
             if max_candle_age > 0 and candle_close_age > max_candle_age:
                 logger.warning(f"[FRESHNESS] Zone recovery blocked: stale candle close age={candle_close_age:.2f}s max={max_candle_age:.2f}s")

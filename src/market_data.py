@@ -191,26 +191,6 @@ class MarketStateManager:
             
             # Calculate returns (absolute price changes)
             prices = self.price_history
-
-    def calculate_bollinger_bands_checked(self, symbol: str, period: int = 20, std_dev: float = 2.0) -> Tuple[Optional[Dict[str, float]], bool, str]:
-        """Bollinger Bands with explicit availability signal (no synthetic zero bands)."""
-        try:
-            candles = self.candles.get_history(symbol)
-            if not candles or len(candles) < period:
-                return None, False, f"Insufficient candles for BB: have={len(candles) if candles else 0} need={period}"
-
-            closes = [float(c['close']) for c in candles[-period:]]
-            sma = sum(closes) / period
-            variance = sum(((x - sma) ** 2) for x in closes) / period
-            std = variance ** 0.5
-            bands = {
-                'upper': sma + (std * std_dev),
-                'middle': sma,
-                'lower': sma - (std * std_dev)
-            }
-            return bands, True, "OK"
-        except Exception as e:
-            return None, False, f"BB error: {e}"
             moves = [abs(prices[i] - prices[i-1]) for i in range(1, len(prices))]
             
             if not moves:
@@ -802,6 +782,26 @@ class MarketDataManager:
     def get_adaptive_sleep_time(self) -> float:
         """Get recommended sleep time based on market conditions."""
         return self.market_state.get_adaptive_sleep()
+
+    def calculate_bollinger_bands_checked(self, symbol: str, period: int = 20, std_dev: float = 2.0) -> Tuple[Optional[Dict[str, float]], bool, str]:
+        """Bollinger Bands with explicit availability signal (no synthetic zero bands)."""
+        try:
+            candles = self.candles.get_history(symbol)
+            if not candles or len(candles) < period:
+                return None, False, f"Insufficient candles for BB: have={len(candles) if candles else 0} need={period}"
+
+            closes = [float(c['close']) for c in candles[-period:]]
+            sma = sum(closes) / period
+            variance = sum(((x - sma) ** 2) for x in closes) / period
+            std = variance ** 0.5
+            bands = {
+                'upper': sma + (std * std_dev),
+                'middle': sma,
+                'lower': sma - (std * std_dev)
+            }
+            return bands, True, "OK"
+        except Exception as e:
+            return None, False, f"BB error: {e}"
 
     def calculate_atr(self, symbol: str, period: int = 14) -> float:
         """
