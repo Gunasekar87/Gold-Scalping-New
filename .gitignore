@@ -31,6 +31,10 @@ config/user_config.json
 
 # Data
 data/*.db
+data/*.db-wal
+data/*.db-shm
+*.db-wal
+*.db-shm
 data/*.log
 *.log
 logs/

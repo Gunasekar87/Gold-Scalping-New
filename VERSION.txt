@@ -1,4 +1,11 @@
-﻿v5.5.0 (THE ARCHITECT) - 2025-12-17
+﻿v5.5.1 (FRESHNESS GATE) - 2025-12-19
+----------------------------------------------------------------
+[NEW] Freshness Gate: Blocks ANY NEW order (entry/hedge/recovery) when tick feed is stale.
+[NEW] Candle Close Freshness: Blocks NEW orders when last completed candle is too old.
+[NEW] Optional Freshness Trace: Throttled [FRESHNESS_TRACE] log for live verification.
+[FIX] CCXT candles: Normalize timestamps (ms -> seconds) for correct candle-age logic.
+----------------------------------------------------------------
+v5.5.0 (THE ARCHITECT) - 2025-12-17
 ----------------------------------------------------------------
 [NEW] The Architect: Spatial Awareness Module (H1 Support/Resistance Mapping).
 [NEW] Entry Veto: Oracle now blocks trades that are too close to major walls.

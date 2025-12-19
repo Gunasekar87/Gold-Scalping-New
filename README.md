@@ -71,6 +71,15 @@ ai_parameters:
   spread_max_points: 30
 \\\
 
+### Execution Precision (Freshness Gate)
+
+The bot can **block any NEW order** (entry/hedge/recovery) if the live feed is stale.
+
+- `AETHER_ENABLE_FRESHNESS_GATE` (default `1`): master switch
+- `AETHER_FRESH_TICK_MAX_AGE_S` (default inherits `AETHER_STRICT_TICK_MAX_AGE_S`): max tick age
+- `AETHER_FRESH_CANDLE_CLOSE_MAX_AGE_S` (default `0` = auto): max age since last completed candle close
+- `AETHER_FRESHNESS_TRACE` (default `0`): throttle-log `[FRESHNESS_TRACE]` lines for verification
+
 ## Architecture
 
 \\\

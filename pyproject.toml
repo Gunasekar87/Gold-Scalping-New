@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aether-trading-bot"
-version = "5.4.0"
+version = "5.5.1"
 description = "Adaptive Evolution Trading & Hedging Execution Robot"
 readme = "README.md"
 requires-python = ">=3.10"
