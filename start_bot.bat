@@ -1,9 +1,9 @@
 ﻿@echo off
 REM AETHER Trading System - Quick Start
-REM Version 4.0 - Stable Production
+REM Version 5.5.3
 
 echo ========================================
-echo AETHER Trading System v4.0
+echo AETHER Trading System v5.5.3
 echo ========================================
 echo.
 

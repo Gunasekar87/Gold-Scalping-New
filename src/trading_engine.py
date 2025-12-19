@@ -2637,12 +2637,28 @@ class TradingEngine:
                             
                             decision = self._hedge_policy.decide(features, context)
                             
-                            if not decision["hedge"]:
+                            hedge_allowed = False
+                            try:
+                                hedge_allowed = bool(decision.get("hedge", False))
+                            except Exception:
+                                try:
+                                    hedge_allowed = bool(decision["hedge"])
+                                except Exception:
+                                    hedge_allowed = False
+
+                            if not hedge_allowed:
                                 # >>> [INTELLIGENCE INJECTION] <<<
                                 # Execute Plan B instead of just skipping
                                 await self._handle_blocked_hedge_strategy(symbol, symbol_positions, decision, tick)
 
-                                logger.info(f"[HEDGE-SKIP] Policy declined hedge: {decision['reasons']}")
+                                decline_reasons = []
+                                try:
+                                    decline_reasons = decision.get("reasons") or []
+                                except Exception:
+                                    decline_reasons = []
+                                if not isinstance(decline_reasons, list):
+                                    decline_reasons = [str(decline_reasons)]
+                                logger.info(f"[HEDGE-SKIP] Policy declined hedge: {decline_reasons}")
                                 if FLAGS.ENABLE_TELEMETRY:
                                     self._telemetry.write(DecisionRecord(
                                         ts=time.time(), symbol=symbol, action="hedge-skip", side=hedge_type,
@@ -2652,79 +2668,98 @@ class TradingEngine:
                                 # Do NOT return early here (would skip exit logic). Just skip placing this hedge.
                                 should_hedge = False
                                 
-                            # Apply Policy Outputs
-                            tp_price = decision["tp_price"]
-                            sl_price = decision["sl_price"]
-                            confidence = decision["confidence"]
-                            policy_reasons = decision["reasons"]
+                            # Apply Policy Outputs (be defensive: when hedge is declined, TP/SL may be omitted)
+                            tp_price = 0.0
+                            sl_price = 0.0
+                            confidence = 0.0
+                            policy_reasons = []
+
+                            try:
+                                confidence = float(decision.get("confidence", 0.0) or 0.0)
+                            except Exception:
+                                confidence = 0.0
+
+                            try:
+                                policy_reasons = decision.get("reasons") or []
+                            except Exception:
+                                policy_reasons = []
+                            if not isinstance(policy_reasons, list):
+                                policy_reasons = [str(policy_reasons)]
+
+                            if hedge_allowed:
+                                try:
+                                    tp_price = float(decision.get("tp_price", 0.0) or 0.0)
+                                except Exception:
+                                    tp_price = 0.0
+                                try:
+                                    sl_price = float(decision.get("sl_price", 0.0) or 0.0)
+                                except Exception:
+                                    sl_price = 0.0
+
                             ai_reason += f" | Conf: {confidence:.2f}"
 
-                        # Construct AI Reason for User
-                        if stabilizer_triggered:
-                            ai_reason = "STABILIZER PROTOCOL: Drawdown > 1.5x ATR. Emergency Hedge."
-                        elif hedge_type == "BUY":
-                            if current_rsi > 75: ai_reason = f"Extreme Bullish Momentum (RSI {current_rsi:.1f}). Max Aggression (1.25x) to counter Sell loss."
-                            elif current_rsi > 60: ai_reason = f"Strong Bullish Trend (RSI {current_rsi:.1f}). Increased Aggression (1.15x)."
-                            else: ai_reason = f"Normal Market (RSI {current_rsi:.1f}). Standard Overpower (1.05x)."
-                        else: # SELL
-                            if current_rsi < 25: ai_reason = f"Extreme Bearish Momentum (RSI {current_rsi:.1f}). Max Aggression (1.25x) to counter Buy loss."
-                            elif current_rsi < 40: ai_reason = f"Strong Bearish Trend (RSI {current_rsi:.1f}). Increased Aggression (1.15x)."
-                            else: ai_reason = f"Normal Market (RSI {current_rsi:.1f}). Standard Overpower (1.05x)."
+                        will_execute_hedge = bool(stabilizer_triggered or should_hedge)
+                        if will_execute_hedge:
+                            # Construct AI Reason for User
+                            if stabilizer_triggered:
+                                ai_reason = "STABILIZER PROTOCOL: Drawdown > 1.5x ATR. Emergency Hedge."
+                            elif hedge_type == "BUY":
+                                if current_rsi > 75: ai_reason = f"Extreme Bullish Momentum (RSI {current_rsi:.1f}). Max Aggression (1.25x) to counter Sell loss."
+                                elif current_rsi > 60: ai_reason = f"Strong Bullish Trend (RSI {current_rsi:.1f}). Increased Aggression (1.15x)."
+                                else: ai_reason = f"Normal Market (RSI {current_rsi:.1f}). Standard Overpower (1.05x)."
+                            else: # SELL
+                                if current_rsi < 25: ai_reason = f"Extreme Bearish Momentum (RSI {current_rsi:.1f}). Max Aggression (1.25x) to counter Buy loss."
+                                elif current_rsi < 40: ai_reason = f"Strong Bearish Trend (RSI {current_rsi:.1f}). Increased Aggression (1.15x)."
+                                else: ai_reason = f"Normal Market (RSI {current_rsi:.1f}). Standard Overpower (1.05x)."
 
-                        # Use UI Logger for visible terminal output
-                        # [USER REQUEST] Standardized Hedge Log
-                        
-                        # Calculate estimated TP for display (Bucket Logic)
-                        # We can't know the exact TP until update_bucket_tp runs, but we can estimate it.
-                        # Usually it's Break-Even + Target.
-                        # For display, we can just say "Dynamic (Bucket)"
-                        
-                        # --- AI PLAN LOG ---
-                        hedge_plan_msg = (
-                            f"\n>>> [AI DEFENSE PLAN] ACTIVATING HEDGE <<<\n"
-                            f"Trigger:      {ai_reason}\n"
-                            f"Action:       OPEN {hedge_type} {hedge_lot} lots\n"
-                            f"Objective:    Neutralize Drawdown & Prepare for Recovery\n"
-                            f"Status:       EXECUTING NOW...\n"
-                            f"----------------------------------------------------"
-                        )
-                        import sys
-                        if sys.platform == 'win32':
-                            ui_logger.info(hedge_plan_msg)
-                        else:
-                            try:
+                            # Use UI Logger for visible terminal output
+                            # [USER REQUEST] Standardized Hedge Log
+
+                            # --- AI PLAN LOG ---
+                            hedge_plan_msg = (
+                                f"\n>>> [AI DEFENSE PLAN] ACTIVATING HEDGE <<<\n"
+                                f"Trigger:      {ai_reason}\n"
+                                f"Action:       OPEN {hedge_type} {hedge_lot} lots\n"
+                                f"Objective:    Neutralize Drawdown & Prepare for Recovery\n"
+                                f"Status:       EXECUTING NOW...\n"
+                                f"----------------------------------------------------"
+                            )
+                            import sys
+                            if sys.platform == 'win32':
                                 ui_logger.info(hedge_plan_msg)
-                            except Exception:
-                                ui_logger.info(hedge_plan_msg)
-                        # -------------------
+                            else:
+                                try:
+                                    ui_logger.info(hedge_plan_msg)
+                                except Exception:
+                                    ui_logger.info(hedge_plan_msg)
+                            # -------------------
 
-                        TradingLogger.log_initial_trade(f"{symbol}_HEDGE_{len(symbol_positions)}", {
-                            'action': hedge_type,
-                            'symbol': symbol,
-                            'lots': hedge_lot,
-                            'entry_price': tick['bid'] if hedge_type == "SELL" else tick['ask'],
-                            'tp_price': tp_price if tp_price > 0 else "Dynamic", 
-                            'tp_atr': 0.0,
-                            'tp_pips': "Bucket", 
-                            'hedges': [], # No nested hedges
-                            'atr_pips': current_atr * 10000, # Approx
-                            'reasoning': f"[HEDGE {len(symbol_positions)}] {ai_reason}",
-                            'confidence': confidence,
-                            'reasons': policy_reasons
-                        })
-                        
-                        if FLAGS.ENABLE_TELEMETRY:
-                            self._telemetry.write(DecisionRecord(
-                                ts=time.time(), symbol=symbol, action="hedge-open", side=hedge_type,
-                                price=tick['bid'] if hedge_type == "SELL" else tick['ask'], 
-                                lots=hedge_lot,
-                                features=features if FLAGS.ENABLE_POLICY else {},
-                                context=context if FLAGS.ENABLE_POLICY else {},
-                                decision={"tp_price": tp_price, "sl_price": sl_price, "confidence": confidence, "reasons": policy_reasons}
-                            ))
+                            TradingLogger.log_initial_trade(f"{symbol}_HEDGE_{len(symbol_positions)}", {
+                                'action': hedge_type,
+                                'symbol': symbol,
+                                'lots': hedge_lot,
+                                'entry_price': tick['bid'] if hedge_type == "SELL" else tick['ask'],
+                                'tp_price': tp_price if tp_price > 0 else "Dynamic",
+                                'tp_atr': 0.0,
+                                'tp_pips': "Bucket",
+                                'hedges': [], # No nested hedges
+                                'atr_pips': current_atr * 10000, # Approx
+                                'reasoning': f"[HEDGE {len(symbol_positions)}] {ai_reason}",
+                                'confidence': confidence,
+                                'reasons': policy_reasons
+                            })
 
-                        # Execute directly via broker to bypass standard entry checks
-                        if should_hedge or stabilizer_triggered:
+                            if FLAGS.ENABLE_TELEMETRY:
+                                self._telemetry.write(DecisionRecord(
+                                    ts=time.time(), symbol=symbol, action="hedge-open", side=hedge_type,
+                                    price=tick['bid'] if hedge_type == "SELL" else tick['ask'],
+                                    lots=hedge_lot,
+                                    features=features if FLAGS.ENABLE_POLICY else {},
+                                    context=context if FLAGS.ENABLE_POLICY else {},
+                                    decision={"tp_price": tp_price, "sl_price": sl_price, "confidence": confidence, "reasons": policy_reasons}
+                                ))
+
+                            # Execute directly via broker to bypass standard entry checks
                             self.broker.execute_order(
                                 action="OPEN",
                                 symbol=symbol,

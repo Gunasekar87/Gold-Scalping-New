@@ -63,3 +63,4 @@ evolution_state.json
 # Runtime state (generated)
 data/position_state.json
 data/position_state.*.json
+data/optimizer_state.json

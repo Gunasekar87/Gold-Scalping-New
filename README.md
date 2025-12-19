@@ -54,7 +54,7 @@ python run_bot.py 3600
 
 \\\yaml
 system:
-  version: "5.5.2"
+  version: "5.5.3"
   mode: "PAPER"  # or "LIVE"
 
 trading:
@@ -189,7 +189,7 @@ exus_confidence_threshold\
 
 - Documentation: See \BUCKET_TP_STRATEGY.md\
 - Issues: GitHub Issues
-- Version: 5.5.2
+- Version: 5.5.3
 
 ## License
 

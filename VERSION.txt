@@ -1,4 +1,13 @@
-﻿v5.5.2 (LIVE PROVENANCE & FUSION CLARITY) - 2025-12-19
+﻿v5.5.3 (RUNTIME STABILITY HOTFIX) - 2025-12-19
+----------------------------------------------------------------
+[FIX] HedgePolicy Outputs: Defensive handling when policy declines (no missing tp/sl/reasons crashes).
+[FIX] Hedge Intelligence: None-safe coercion for volatility_ratio / RSI / ADX to prevent TypeErrors.
+[FIX] Supervisor: Hardened macro_context + volatility_ratio parsing to avoid regime crashes.
+[FIX] Logging Correctness: "AI DEFENSE PLAN" log only emits when hedge is actually executed.
+[OPS] Repo Hygiene: Ignore runtime optimizer_state.json (prevents noisy untracked data/ state).
+[OPS] Windows Start Script: Version banner aligned to 5.5.3.
+----------------------------------------------------------------
+v5.5.2 (LIVE PROVENANCE & FUSION CLARITY) - 2025-12-19
 ----------------------------------------------------------------
 [NEW] Data Provenance Trace: Optional throttled [DATA_TRACE] proving tick/candle/OBI freshness at runtime.
 [NEW] Candle Cache Control: `AETHER_CANDLE_CACHE_TIMEOUT_S` to reduce candle staleness when needed.

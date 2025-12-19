@@ -12,7 +12,7 @@ The bot orchestrates:
 
 Author: AETHER Development Team
 License: MIT
-Version: 5.5.2
+Version: 5.5.3
 """
 
 import asyncio

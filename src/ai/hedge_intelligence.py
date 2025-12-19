@@ -35,6 +35,8 @@ class HedgeIntelligence:
         # 1. CRITICAL: CHAOS LOCK
         # If volatility is extreme (News/Crash), DO NOT ADD RISK.
         volatility_ratio = market_data.get('volatility_ratio', 1.0)
+        if volatility_ratio is None or not isinstance(volatility_ratio, (int, float)):
+            volatility_ratio = 1.0
         if volatility_ratio > self.CHAOS_THRESHOLD:
             return HedgeDecision(False, f"CHAOS_LOCK (Vol {volatility_ratio:.1f}x)")
 
@@ -42,6 +44,8 @@ class HedgeIntelligence:
         # Only enforce strict exhaustion checks if volatility is elevated.
         # In calm markets, standard grid logic is fine.
         rsi = market_data.get('rsi', 50)
+        if rsi is None or not isinstance(rsi, (int, float)):
+            rsi = 50
         close_price = market_data.get('close', 0.0)
         bb_upper = market_data.get('bb_upper', None)
         bb_lower = market_data.get('bb_lower', None)
@@ -64,6 +68,8 @@ class HedgeIntelligence:
         # 3. REGIME FILTER (Secondary Check)
         # In a strong trend, don't hedge against it blindly.
         adx = market_data.get('adx', 0)
+        if adx is None or not isinstance(adx, (int, float)):
+            adx = 0
         
         if regime == "TREND":
             if position_type == 'buy' and rsi > 40 and adx > self.STRONG_TREND_ADX:

@@ -45,10 +45,14 @@ class Supervisor:
             atr = market_data.get('atr', 0.0)
             trend_strength = market_data.get('trend_strength', 0.0) # 0.0 to 1.0 (ADX proxy)
             volatility_ratio = market_data.get('volatility_ratio', 1.0)
+            if volatility_ratio is None or not isinstance(volatility_ratio, (int, float)):
+                volatility_ratio = 1.0
             
             # [PHASE 1 DATA] Macro Context
             macro_context = market_data.get('macro_context', [0.0, 0.0])
-            usd_velocity = abs(macro_context[0])
+            if not isinstance(macro_context, (list, tuple)) or len(macro_context) < 1:
+                macro_context = [0.0, 0.0]
+            usd_velocity = abs(float(macro_context[0] or 0.0))
             
             # Classification Logic
             if volatility_ratio > 2.5 or usd_velocity > 5.0:
