@@ -19,9 +19,12 @@ class TickPressureAnalyzer:
         if not tick:
             return
             
-        # Use Bid price for pressure analysis (or Mid)
+        # Use Bid price for pressure analysis.
+        # IMPORTANT: Use local wall-clock time for timing/velocity.
+        # MT5 tick timestamps are often coarse (seconds) which can make duration ~0
+        # and artificially saturate velocity/pressure.
         price = tick.get('bid', 0.0)
-        current_time = tick.get('time', time.time())
+        current_time = time.time()
         
         if price > 0:
             self.ticks.append((price, current_time))

@@ -182,6 +182,19 @@ class TradingEngine:
         self._last_freshness_ok: Optional[bool] = None
         self._last_freshness_trace_ts: float = 0.0
 
+        # Optional data provenance trace (tick/candles/OBI availability) for live verification
+        self._data_provenance_trace = str(os.getenv("AETHER_DATA_PROVENANCE_TRACE", "0")).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        try:
+            self._data_provenance_trace_interval_s = float(os.getenv("AETHER_DATA_PROVENANCE_TRACE_EVERY_S", "30"))
+        except Exception:
+            self._data_provenance_trace_interval_s = 30.0
+        self._last_data_prov_trace_ts: float = 0.0
+
         self._last_entry_gate_reason: Optional[str] = None
         self._last_entry_gate_ts: float = 0.0
 
@@ -309,6 +322,68 @@ class TradingEngine:
 
         self._last_freshness_ok = bool(ok)
         self._last_freshness_trace_ts = now
+
+    def _maybe_log_data_provenance_trace(self, symbol: str, tick: Dict) -> None:
+        """Optional trace proving which inputs are live vs missing.
+
+        This does not change decisions; it only logs a compact snapshot periodically.
+        """
+        if not self._data_provenance_trace:
+            return
+
+        now = time.time()
+        interval = float(self._data_provenance_trace_interval_s) if self._data_provenance_trace_interval_s else 30.0
+        if interval <= 0:
+            interval = 30.0
+        if (now - float(self._last_data_prov_trace_ts)) < interval:
+            return
+        self._last_data_prov_trace_ts = now
+
+        # Tick timing
+        try:
+            tick_ts = float(tick.get('time', 0.0) or 0.0)
+        except Exception:
+            tick_ts = 0.0
+        try:
+            tick_age = float(tick.get('tick_age_s', float('inf')))
+        except Exception:
+            tick_age = float('inf')
+
+        # Candle timing (latest completed candle close)
+        try:
+            candle_close_ts = float(tick.get('candle_close_ts', 0.0) or 0.0)
+        except Exception:
+            candle_close_ts = 0.0
+        try:
+            candle_close_age = float(tick.get('candle_close_age_s', float('inf')))
+        except Exception:
+            candle_close_age = float('inf')
+
+        # Candle history snapshot (count + latest bar open)
+        candle_count = None
+        last_bar_open_ts = None
+        try:
+            history = self.market_data.candles.get_history(symbol)
+            candle_count = int(len(history)) if history else 0
+            if history:
+                last_bar_open_ts = float(history[-1].get('time', 0) or 0)
+        except Exception:
+            candle_count = None
+            last_bar_open_ts = None
+
+        # Order book / OBI availability (from MarketDataManager tick enrichment)
+        obi = tick.get('obi', None)
+        obi_ok = bool(tick.get('obi_ok', False))
+        obi_applicable = bool(tick.get('obi_applicable', False))
+
+        logger.info(
+            "[DATA_TRACE] "
+            f"symbol={symbol} broker={type(self.broker).__name__ if self.broker else None} "
+            f"tick_ts={tick_ts:.0f} tick_age_s={tick_age:.2f} "
+            f"candle_close_ts={candle_close_ts:.0f} candle_close_age_s={candle_close_age:.2f} "
+            f"candles_n={candle_count} last_bar_open_ts={last_bar_open_ts} "
+            f"obi={obi} obi_ok={obi_ok} obi_applicable={obi_applicable}"
+        )
 
     def _update_equity_metrics_throttled(self) -> None:
         """Track equity peak and max drawdown, throttled for HFT loop safety."""
@@ -1348,6 +1423,12 @@ class TradingEngine:
             # [HIGHEST INTELLIGENCE] LAYER 2: CALCULATED RECOVERY
             # Check if bucket is stuck > 30 mins and needs a muscle move
             # Now includes IronShield for Trend Veto
+            # Ensure any recovery NEW order respects the same per-symbol cap as zone recovery.
+            try:
+                market_data['max_positions_per_symbol'] = int(self.risk_manager.config.max_hedges)
+            except Exception:
+                # Fail-safe: if cap is unavailable, do not inject anything and let PositionManager fallback.
+                pass
             calculated_recovery_executed = await self.position_manager.execute_calculated_recovery(
                 self.broker, bucket_id, market_data, self.risk_manager.shield
             )
@@ -1559,6 +1640,7 @@ class TradingEngine:
 
             # Optional telemetry: prove tick/candle freshness live (throttled)
             self._maybe_log_freshness_trace(tick)
+            self._maybe_log_data_provenance_trace(symbol, tick)
 
             # [HIGHEST INTELLIGENCE] Update Tick Pressure Analyzer
             self.tick_analyzer.add_tick(tick)
@@ -2548,7 +2630,9 @@ class TradingEngine:
                                 "side": hedge_type.lower(),
                                 "price": tick['bid'] if hedge_type == "SELL" else tick['ask'],
                                 "atr": current_atr,
-                                "open_hedges": len(symbol_positions),
+                                # HedgePolicy expects the number of hedges (not total positions).
+                                # Base position counts as 0 hedges.
+                                "open_hedges": max(0, len(symbol_positions) - 1),
                             }
                             
                             decision = self._hedge_policy.decide(features, context)

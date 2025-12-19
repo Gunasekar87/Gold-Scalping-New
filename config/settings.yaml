@@ -1,5 +1,5 @@
 system:
-  version: "4.0.1"
+  version: "5.5.2"
   mode: "PAPER" # CHANGED FROM LIVE - Use PAPER mode for testing
   log_level: "INFO"
 

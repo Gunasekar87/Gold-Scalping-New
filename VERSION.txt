@@ -1,4 +1,12 @@
-﻿v5.5.1 (FRESHNESS GATE) - 2025-12-19
+﻿v5.5.2 (LIVE PROVENANCE & FUSION CLARITY) - 2025-12-19
+----------------------------------------------------------------
+[NEW] Data Provenance Trace: Optional throttled [DATA_TRACE] proving tick/candle/OBI freshness at runtime.
+[NEW] Candle Cache Control: `AETHER_CANDLE_CACHE_TIMEOUT_S` to reduce candle staleness when needed.
+[FIX] Fusion Tick Velocity: Uses directional tick-speed normalization to avoid pinned +/-1.0 artifacts.
+[FIX] Oracle Order Book: Prefers broker DOM and labels `order_book_source` for auditable fallbacks.
+[FIX] Hedge/Recovery Caps: Correct hedge counting and enforce per-symbol cap in calculated recovery.
+----------------------------------------------------------------
+v5.5.1 (FRESHNESS GATE) - 2025-12-19
 ----------------------------------------------------------------
 [NEW] Freshness Gate: Blocks ANY NEW order (entry/hedge/recovery) when tick feed is stale.
 [NEW] Candle Close Freshness: Blocks NEW orders when last completed candle is too old.

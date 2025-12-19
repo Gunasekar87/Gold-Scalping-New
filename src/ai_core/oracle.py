@@ -26,6 +26,7 @@ class Oracle:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = None
         self.model_path = model_path
+        self.mt5_adapter = mt5_adapter
         self.architect = Architect(mt5_adapter) if mt5_adapter else None
         self.tick_pressure = tick_analyzer
         self.global_brain = global_brain
@@ -40,10 +41,27 @@ class Oracle:
 
     def _get_order_book_imbalance(self, symbol: str) -> Optional[float]:
         """Return normalized order-book imbalance in [-1, 1] when MT5 market book is available."""
-        if not symbol or mt5 is None:
+        if not symbol:
             return None
 
         try:
+            # Prefer the broker adapter if available (keeps behavior consistent with MarketDataManager).
+            if self.mt5_adapter is not None and hasattr(self.mt5_adapter, 'get_order_book'):
+                book = self.mt5_adapter.get_order_book(symbol)
+                if book:
+                    bids = book.get('bids', []) or []
+                    asks = book.get('asks', []) or []
+                    bid_vol = float(sum(item.get('volume', 0.0) for item in bids))
+                    ask_vol = float(sum(item.get('volume', 0.0) for item in asks))
+                    denom = bid_vol + ask_vol
+                    if denom > 0:
+                        imbalance = (bid_vol - ask_vol) / denom
+                        return max(-1.0, min(1.0, float(imbalance)))
+
+            # Fallback: direct MT5 Market Book
+            if mt5 is None:
+                return None
+
             # Ensure book subscription (MT5 requires market_book_add).
             if symbol not in self._market_book_symbols:
                 try:
@@ -174,27 +192,43 @@ class Oracle:
         
         # 3. Reality Lock (Tick Pressure)
         pressure_val = 0.0
-        pressure_score = 0.0 # Normalized -1 to 1
+        pressure_score = 0.0 # Directional micro-signal normalized to [-1, 1]
         if self.tick_pressure:
             metrics = self.tick_pressure.get_pressure_metrics()
             pressure_val = metrics.get('pressure_score', 0.0)
-            # Normalize pressure without saturating to +/-1 too easily.
-            # tanh keeps output bounded but still varying.
-            norm = float(os.getenv("AETHER_PRESSURE_NORM", "50"))
-            if norm <= 0:
-                norm = 50.0
-            pressure_score = float(np.tanh(float(pressure_val) / norm))
+
+            # IMPORTANT:
+            # The fusion key is named `tick_velocity`, but `pressure_score` is directional
+            # (BUY/SELL) and can get large quickly. To avoid pinning at +/-1.0, we use:
+            # - magnitude: normalized tick speed (ticks/sec)
+            # - sign: direction from pressure (BUY vs SELL)
+            velocity = float(metrics.get('velocity', 0.0) or 0.0)
+            vel_norm = float(os.getenv("AETHER_VELOCITY_NORM", "15"))
+            if vel_norm <= 0:
+                vel_norm = 15.0
+
+            direction = 0.0
+            if pressure_val > 0:
+                direction = 1.0
+            elif pressure_val < 0:
+                direction = -1.0
+
+            pressure_score = float(direction * np.tanh(velocity / vel_norm))
 
         # 4. Contrastive Fusion (The Judge)
-        # Order book modality: use MT5 market book imbalance if available; else fall back to macro proxy.
+        # Order book modality: use real DOM when available; else fall back to macro proxy.
+        order_book_source = "order_book"
         order_book_signal = self._get_order_book_imbalance(symbol)
         if order_book_signal is None:
             order_book_signal = macro_signal
+            order_book_source = "macro_fallback"
 
         signals = {
             "tick_velocity": pressure_score,
             "candle_pattern": ai_score,
-            "order_book": float(order_book_signal)
+            "order_book": float(order_book_signal),
+            # Extra fields (not used by coherence math) to make logs unambiguous.
+            "order_book_source": order_book_source,
         }
         
         coherence = self.fusion.compute_coherence(signals)

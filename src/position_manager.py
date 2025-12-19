@@ -398,6 +398,26 @@ class PositionManager:
             positions = [self.active_positions[t] for t in stats.positions if t in self.active_positions]
             if not positions:
                 return False
+
+            # Safety: enforce per-symbol max positions to prevent recovery from bypassing zone limits.
+            # This cap is intended to be TOTAL positions on the symbol (base + hedges + recovery).
+            max_positions_per_symbol = market_data.get('max_positions_per_symbol')
+            if max_positions_per_symbol is None:
+                try:
+                    max_positions_per_symbol = int(os.getenv('AETHER_MAX_POSITIONS_PER_SYMBOL', '0'))
+                except Exception:
+                    max_positions_per_symbol = 0
+            try:
+                max_positions_per_symbol = int(max_positions_per_symbol) if max_positions_per_symbol is not None else 0
+            except Exception:
+                max_positions_per_symbol = 0
+            if max_positions_per_symbol and max_positions_per_symbol > 0:
+                if len(positions) >= max_positions_per_symbol:
+                    logger.warning(
+                        f"[RISK] Calculated recovery blocked: max positions per symbol reached "
+                        f"({len(positions)}/{max_positions_per_symbol})"
+                    )
+                    return False
                 
             # Calculate Drawdown
             drawdown = self.calculate_bucket_drawdown(bucket_id, market_data)

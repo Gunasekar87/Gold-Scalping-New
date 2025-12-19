@@ -239,7 +239,12 @@ class CandleManager:
         self.timeframe = timeframe
         self._cache: Dict[str, Dict] = {}
         self._cache_lock = Lock()
-        self._cache_timeout = 30  # seconds
+        try:
+            self._cache_timeout = float(os.getenv("AETHER_CANDLE_CACHE_TIMEOUT_S", "30"))
+        except Exception:
+            self._cache_timeout = 30.0
+        if self._cache_timeout < 0:
+            self._cache_timeout = 0.0
 
     def _timeframe_seconds(self) -> int:
         tf = (self.timeframe or "M1").upper()

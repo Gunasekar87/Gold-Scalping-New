@@ -59,3 +59,7 @@ dashboard_state.json
 bot_state.json
 brain_memory.json
 evolution_state.json
+
+# Runtime state (generated)
+data/position_state.json
+data/position_state.*.json

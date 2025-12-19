@@ -53,13 +53,26 @@ def setup_environment():
 
     # 3. Pre-load Heavy Libraries (Torch)
     # This prevents DLL loading hangs on some Windows systems
-    print(">>> [SYSTEM] Starting Aether Bot v5.5.0 (The Architect)...", flush=True)
+    print(">>> [SYSTEM] Starting Aether Bot v5.5.2 (The Architect)...", flush=True)
     print(">>> [SYSTEM] Pre-loading AI Libraries (Torch)...", flush=True)
     try:
         import torch
         print(">>> [SYSTEM] AI Libraries Loaded.", flush=True)
     except ImportError:
         print(">>> [WARN] Torch not found. AI features may be limited.", flush=True)
+
+    # Optional runtime trace to prove which code is actually executing.
+    # Enable with: AETHER_RUNTIME_TRACE=1
+    if str(os.getenv("AETHER_RUNTIME_TRACE", "0")).strip().lower() in ("1", "true", "yes", "on"):
+        try:
+            import src
+            from src.ai_core import oracle as _oracle_mod
+            from src.ai_core import contrastive_fusion as _fusion_mod
+            print(f">>> [TRACE] src package: {getattr(src, '__file__', None)}", flush=True)
+            print(f">>> [TRACE] oracle.py: {getattr(_oracle_mod, '__file__', None)}", flush=True)
+            print(f">>> [TRACE] contrastive_fusion.py: {getattr(_fusion_mod, '__file__', None)}", flush=True)
+        except Exception as e:
+            print(f">>> [TRACE] Runtime trace failed: {e}", flush=True)
 
 def optimize_process():
     """Apply OS-level process optimizations."""
