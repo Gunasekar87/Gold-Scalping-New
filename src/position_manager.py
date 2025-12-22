@@ -174,46 +174,65 @@ class PositionManager:
         self._load_state()
 
     def _p95(self, values: List[float]) -> float:
-        if not values:
-            return 0.0
-        ordered = sorted(values)
-        # Nearest-rank method
-        k = int(math.ceil(0.95 * len(ordered))) - 1
-        k = max(0, min(k, len(ordered) - 1))
-        return float(ordered[k])
+        if enable_freshness:
+            # [TIMEZONE AUTO-CORRECTION] Prefer explicit override; else auto-detect once.
+            now = time.time()
+            tick_ts = float(market_data.get('time', 0.0) or 0.0)
 
-    def _record_close_slippage_sample(self, symbol: str, request_price: Optional[float], fill_price: Optional[float]) -> None:
-        """Record per-lot slippage in USD based on request vs fill price."""
-        if not self._slippage_enabled:
-            return
-        if not symbol or request_price is None or fill_price is None:
-            return
+            env_offset = os.getenv("AETHER_TIME_OFFSET_SECS", None)
+            if env_offset is not None:
+                try:
+                    self._time_offset = float(env_offset)
+                except Exception:
+                    self._time_offset = None
 
-        try:
-            info = mt5.symbol_info(symbol)
-            contract_size = float(getattr(info, 'trade_contract_size', 0.0) or 0.0)
-            if contract_size <= 0:
-                return
+            if self._time_offset is None and tick_ts > 0:
+                raw_diff = now - tick_ts
+                if abs(raw_diff) > 600:
+                    self._time_offset = raw_diff
+                    logger.warning(f"[FRESHNESS] Detected Timezone Offset: {self._time_offset:.2f}s. Adjusting...")
+                else:
+                    self._time_offset = 0.0
 
-            per_lot_usd = abs(float(fill_price) - float(request_price)) * contract_size
+            offset = self._time_offset if self._time_offset is not None else 0.0
 
-            # Reject obviously bad samples (e.g., None/NaN/inf)
-            if not (per_lot_usd >= 0.0) or math.isinf(per_lot_usd) or math.isnan(per_lot_usd):
-                return
+            try:
+                if tick_ts > 0:
+                    adjusted_ts = tick_ts + offset
+                    tick_age = abs(now - adjusted_ts)
+                else:
+                    tick_age = float(market_data.get('tick_age_s', float('inf')))
+            except Exception:
+                tick_age = float('inf')
 
-            with self._lock:
-                dq = self._slippage_samples_per_lot_usd.get(symbol)
-                if dq is None:
-                    dq = deque(maxlen=self._slippage_window)
-                    self._slippage_samples_per_lot_usd[symbol] = dq
-                dq.append(per_lot_usd)
-        except Exception:
-            # Never let telemetry interfere with trading.
-            return
+            try:
+                candle_close_age = float(market_data.get('candle_close_age_s', float('inf')))
+            except Exception:
+                candle_close_age = float('inf')
 
-    def _calibrated_profit_buffer(self, symbol: str, total_volume: float, base_buffer_usd: float) -> float:
-        """Return a calibrated (P95) close buffer in USD for a given volume."""
-        if not self._slippage_enabled or not symbol or total_volume <= 0:
+            try:
+                max_tick_age = float(os.getenv("AETHER_FRESH_TICK_MAX_AGE_S", os.getenv("AETHER_STRICT_TICK_MAX_AGE_S", "5.0")))
+            except Exception:
+                max_tick_age = 5.0
+
+            try:
+                max_candle_age = float(os.getenv("AETHER_FRESH_CANDLE_CLOSE_MAX_AGE_S", "0"))
+            except Exception:
+                max_candle_age = 0.0
+
+            if not max_candle_age or max_candle_age <= 0:
+                try:
+                    tf_s = float(market_data.get('timeframe_s', 60) or 60)
+                except Exception:
+                    tf_s = 60.0
+                max_candle_age = max((2.0 * tf_s) + 10.0, 30.0)
+
+            if max_tick_age > 0 and tick_age > max_tick_age:
+                logger.warning(f"\[SAFETY] Recovery {action} blocked. Stale Tick (age={tick_age:.1f}s max={max_tick_age:.1f}s)")
+                return False
+            if max_candle_age > 0 and candle_close_age > max_candle_age:
+                logger.warning(f"\[SAFETY] Recovery {action} blocked. Stale Candle Close (age={candle_close_age:.1f}s max={max_candle_age:.1f}s)")
+                return False
             return base_buffer_usd
 
         with self._lock:
@@ -508,8 +527,15 @@ class PositionManager:
             if enable_freshness:
                 now = time.time()
                 tick_ts = float(market_data.get('time', 0.0) or 0.0)
-                
-                # [TIMEZONE AUTO-CORRECTION]
+
+                # [TIMEZONE AUTO-CORRECTION] Prefer explicit override; else auto-detect once.
+                env_offset = os.getenv("AETHER_TIME_OFFSET_SECS", None)
+                if env_offset is not None:
+                    try:
+                        self._time_offset = float(env_offset)
+                    except Exception:
+                        self._time_offset = None
+
                 if self._time_offset is None and tick_ts > 0:
                     raw_diff = now - tick_ts
                     if abs(raw_diff) > 600:
@@ -517,7 +543,7 @@ class PositionManager:
                         logger.warning(f"[FRESHNESS] Detected Timezone Offset: {self._time_offset:.2f}s. Adjusting...")
                     else:
                         self._time_offset = 0.0
-                
+
                 offset = self._time_offset if self._time_offset is not None else 0.0
 
                 try:
@@ -535,9 +561,9 @@ class PositionManager:
                     candle_close_age = float('inf')
 
                 try:
-                    max_tick_age = float(os.getenv("AETHER_FRESH_TICK_MAX_AGE_S", os.getenv("AETHER_STRICT_TICK_MAX_AGE_S", "2.5")))
+                    max_tick_age = float(os.getenv("AETHER_FRESH_TICK_MAX_AGE_S", os.getenv("AETHER_STRICT_TICK_MAX_AGE_S", "5.0")))
                 except Exception:
-                    max_tick_age = 2.5
+                    max_tick_age = 5.0
                 try:
                     max_candle_age = float(os.getenv("AETHER_FRESH_CANDLE_CLOSE_MAX_AGE_S", "0"))
                 except Exception:
@@ -707,16 +733,30 @@ class PositionManager:
             "on",
         )
         if enable_freshness:
+            # [TIMEZONE AUTO-CORRECTION]
+            now = time.time()
+            tick_ts = float(market_data.get('time', 0.0) or 0.0)
+            
+            if self._time_offset is None and tick_ts > 0:
+                raw_diff = now - tick_ts
+                if abs(raw_diff) > 600:
+                    self._time_offset = raw_diff
+                    logger.warning(f"[FRESHNESS] Detected Timezone Offset: {self._time_offset:.2f}s. Adjusting...")
+                else:
+                    self._time_offset = 0.0
+            
+            offset = self._time_offset if self._time_offset is not None else 0.0
+
             try:
-                tick_age = float(market_data.get('tick_age_s', float('inf')))
+                # If we have a raw timestamp, calculate age using offset
+                if tick_ts > 0:
+                    adjusted_ts = tick_ts + offset
+                    tick_age = abs(now - adjusted_ts)
+                else:
+                    # Fallback to pre-calculated age (which might be wrong if it didn't use offset)
+                    tick_age = float(market_data.get('tick_age_s', float('inf')))
             except Exception:
                 tick_age = float('inf')
-            if tick_age == float('inf'):
-                try:
-                    tick_ts = float(market_data.get('time', 0.0) or 0.0)
-                    tick_age = abs(time.time() - tick_ts) if tick_ts > 0 else float('inf')
-                except Exception:
-                    tick_age = float('inf')
 
             try:
                 candle_close_age = float(market_data.get('candle_close_age_s', float('inf')))

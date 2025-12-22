@@ -1,4 +1,8 @@
-﻿v5.5.3 (RUNTIME STABILITY HOTFIX) - 2025-12-19
+﻿v5.5.5 (TIMEZONE OVERRIDE) - 2025-12-22
+----------------------------------------------------------------
+[FIX] Added explicit AETHER_TIME_OFFSET_SECS override and unified 5.0s freshness gate for recovery/hedge to eliminate timezone blocks.
+
+v5.5.3 (RUNTIME STABILITY HOTFIX) - 2025-12-19
 ----------------------------------------------------------------
 [FIX] HedgePolicy Outputs: Defensive handling when policy declines (no missing tp/sl/reasons crashes).
 [FIX] Hedge Intelligence: None-safe coercion for volatility_ratio / RSI / ADX to prevent TypeErrors.
