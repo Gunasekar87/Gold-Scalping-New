@@ -1,6 +1,7 @@
 import logging
 import numpy as np
 import time
+import os
 from typing import Dict, List
 
 logger = logging.getLogger("ContrastiveFusion")
