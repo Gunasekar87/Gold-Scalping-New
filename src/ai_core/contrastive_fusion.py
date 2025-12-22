@@ -23,6 +23,14 @@ class ContrastiveFusion:
             "order_book": 0.2
         }
 
+        # Allow silencing of conflict logs via env (AETHER_FUSION_LOG=0)
+        self._log_enabled = str(os.getenv("AETHER_FUSION_LOG", "1")).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+
         # Log-throttling for noisy conflict warnings (behavior unchanged; only reduces spam)
         self._conflict_log_interval_s = 5.0
         self._last_conflict_log_ts = 0.0
@@ -54,17 +62,18 @@ class ContrastiveFusion:
         
         if len(non_zero_signs) > 0 and not np.all(non_zero_signs == non_zero_signs[0]):
             # Conflict detected (e.g. Price says Buy, OrderBook says Sell)
-            now = time.monotonic()
-            if now - self._last_conflict_log_ts >= self._conflict_log_interval_s:
-                if self._conflict_suppressed:
-                    logger.warning(
-                        f"[FUSION] Signal Conflict Detected (throttled): {self._conflict_suppressed} repeats suppressed"
-                    )
-                    self._conflict_suppressed = 0
-                logger.warning(f"[FUSION] Signal Conflict Detected: {signals}")
-                self._last_conflict_log_ts = now
-            else:
-                self._conflict_suppressed += 1
+            if self._log_enabled:
+                now = time.monotonic()
+                if now - self._last_conflict_log_ts >= self._conflict_log_interval_s:
+                    if self._conflict_suppressed:
+                        logger.warning(
+                            f"[FUSION] Signal Conflict Detected (throttled): {self._conflict_suppressed} repeats suppressed"
+                        )
+                        self._conflict_suppressed = 0
+                    logger.warning(f"[FUSION] Signal Conflict Detected: {signals}")
+                    self._last_conflict_log_ts = now
+                else:
+                    self._conflict_suppressed += 1
             return 0.1 # Penalty for divergence
 
         # 2. Magnitude Alignment (Weighted Average)

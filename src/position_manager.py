@@ -1332,6 +1332,23 @@ class PositionManager:
         # Absolute floor to cover basic slippage
         return max(target, 1.0)
 
+    def _calibrated_profit_buffer(self, symbol: str, total_volume: float, base_buffer: float) -> float:
+        """
+        Calculate calibrated profit buffer based on volume and symbol volatility.
+        """
+        # XAUUSD/Gold typically has higher spread/slippage
+        is_gold = "XAU" in symbol or "GOLD" in symbol
+        
+        # Estimated slippage cost per lot (conservative)
+        slippage_per_lot = 15.0 if is_gold else 5.0
+        
+        # Calculate volume-based buffer component
+        volume_component = total_volume * slippage_per_lot
+        
+        # The final buffer should be at least the base_buffer (which handles bucket state)
+        # but also needs to cover the volume-based slippage risk.
+        return max(base_buffer, volume_component)
+
     def calculate_net_pnl(self, positions: List[Any]) -> Tuple[float, float, float, float]:
         """
         Calculate True Net PnL (Profit + Swap + Commission).
