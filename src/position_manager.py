@@ -2375,6 +2375,7 @@ class PositionManager:
         """
         with self._lock:
             if bucket_id not in self.bucket_stats:
+                print(f"DEBUG: Bucket {bucket_id} not in bucket_stats")
                 return False
 
             stats = self.bucket_stats[bucket_id]
@@ -2385,6 +2386,7 @@ class PositionManager:
             positions = [self.active_positions[t] for t in stats.positions if t in self.active_positions]
 
         if not positions:
+            print(f"DEBUG: Bucket {bucket_id} has no positions")
             logger.warning(f"Bucket {bucket_id} has no active positions to close")
             # Mark as fully closed
             with self._lock:
@@ -2398,6 +2400,11 @@ class PositionManager:
         # Without market_data here, approximate volatility via bucket size
         approx_vol_ratio = 2.0 if len(positions) >= 4 else 1.0
         base_buffer = 2.0 if approx_vol_ratio > 1.5 else 0.50
+        
+        # [FIX] Relax buffer for GHOST_PROTOCOL to avoid loops on small profits
+        if stats.exit_reason == "GHOST_PROTOCOL":
+            base_buffer = 0.10
+
         if len(positions) >= 4:
             base_buffer *= 2.0
 
@@ -2414,6 +2421,7 @@ class PositionManager:
         is_emergency_close = (stats.exit_reason or "").find("EMERGENCY") >= 0
 
         if live_net_pnl < min_profit_buffer and not (allow_emergency_close_loss and is_emergency_close):
+            print(f"DEBUG: Abort Close. Live={live_net_pnl} Buffer={min_profit_buffer} Reason={stats.exit_reason}")
             if str(os.getenv("AETHER_SLIPPAGE_CALIBRATION_LOG", "1")).strip().lower() in ("1", "true", "yes", "on"):
                 sc = self._get_slippage_sample_count(symbol)
                 p95pl = self._get_slippage_p95_per_lot_usd(symbol)
