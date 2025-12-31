@@ -169,7 +169,7 @@ class TradingEngine:
             "on",
         )
         self._fresh_tick_max_age_s = float(
-            os.getenv("AETHER_FRESH_TICK_MAX_AGE_S", "2.5")
+            os.getenv("AETHER_FRESH_TICK_MAX_AGE_S", "3.0")
         )
         # 0/negative = auto based on timeframe (2x TF + 10s)
         self._fresh_candle_close_max_age_s = float(os.getenv("AETHER_FRESH_CANDLE_CLOSE_MAX_AGE_S", "0"))
@@ -588,8 +588,17 @@ class TradingEngine:
 
             # Validate lot size bounds
             if entry_lot < self.config.min_lot:
-                # If calculated is too small but we have equity, default to min_lot
-                entry_lot = self.config.min_lot
+                # Logic Fix: If calculated safe lot is smaller than min_lot, we should NOT force min_lot
+                # as that increases risk beyond what the strategy deemed safe.
+                # However, for small accounts, this might prevent trading entirely.
+                # We will allow it ONLY if equity > $500, otherwise we block to save the account.
+                equity = account_info.get('equity', 0)
+                if equity < 500:
+                    logger.warning(f"Safe lot {entry_lot} < Min lot {self.config.min_lot}. Account small (${equity}). BLOCKING to prevent over-leverage.")
+                    return 0.0, "Safe lot size below minimum"
+                else:
+                    # For larger accounts, rounding down to min_lot is acceptable risk
+                    entry_lot = self.config.min_lot
 
             if entry_lot > self.config.max_lot:
                 entry_lot = self.config.max_lot

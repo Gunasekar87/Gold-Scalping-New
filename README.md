@@ -1,196 +1,212 @@
-﻿# AETHER Trading System - Version 4.0.4 (The Global Brain)
+﻿# AETHER Trading System - The Complete Technical Manual
 
-**Status**:  Production Ready  
-**Version**: 4.0.4  
-**Date**: December 02, 2025  
+**Version:** 5.5.8 (VELOCITY VETO)  
+**Architecture:** Hybrid AI (Transformer + PPO + Heuristic)  
+**Market:** XAUUSD (Gold) / Forex  
+**Platform:** MetaTrader 5 (Windows)
 
-## Overview
+---
 
-This is **Version 4.0.4** of the AETHER AI Trading System, introducing "God Mode" intelligence and mathematical perfection in execution.
+## Table of Contents
 
-### New in v4.0.4
-- **Layer 9 (Global Brain)**: Inter-Market Correlation Engine. Monitors DXY (Dollar) and US10Y (Yields) to predict Gold moves before they happen.
-- **Velvet Cushion Protocol**: Dynamic slippage buffer that calculates the "Cost of Business" (Spread + Volatility) to ensure every close is net positive.
-- **Iron Trap Geometry**: Fixed Hedge 3/4 logic to strictly enforce zone boundaries, eliminating "No Man's Land" exposure.
-- **Council of Nine**: Replaced hard AI blocks with "Soft Penalties" (Weighted Voting) to prevent analysis paralysis while maintaining safety.
-- **Unified Zone Recovery**: Aligned the "Trading Plan" logs perfectly with the Risk Manager's execution logic.
+1.  [Introduction](#1-introduction)
+2.  [System Architecture](#2-system-architecture)
+3.  [Installation & Setup (A-Z)](#3-installation--setup-a-z)
+4.  [Configuration Guide](#4-configuration-guide)
+5.  [Core Logic & Data Flow](#5-core-logic--data-flow)
+    *   [5.1 The Tick Loop](#51-the-tick-loop)
+    *   [5.2 AI Decision Making](#52-ai-decision-making)
+    *   [5.3 Risk Management (Zone Recovery)](#53-risk-management-zone-recovery)
+6.  [AI Models Explained](#6-ai-models-explained)
+7.  [Project Structure (Micro-Details)](#7-project-structure-micro-details)
+8.  [Troubleshooting](#8-troubleshooting)
 
-## Features
+---
 
-### Core Trading
-- **Entry Logic**: AI Council (Nexus + Macro + Sentiment + Quantum)
-- **Exit Logic**: Hybrid TP/SL (see BUCKET_TP_STRATEGY.md)
-- **Risk Management**: Zone recovery, position sizing, max drawdown
-- **Latency**: 50ms (broker TP) / 100ms (bucket monitoring)
+## 1. Introduction
 
-### AI Components
-- **NexusBrain**: Transformer-based prediction (663K params)
-- **PPO Guardian**: Reinforcement learning for exits
-- **Council**: Multi-agent consensus decision
-- **Strategist**: Dynamic risk multipliers
-- **IronShield**: Position sizing and recovery
+**AETHER** is an institutional-grade algorithmic trading system designed to solve the "Scalper's Dilemma": how to capture small profits frequently without being wiped out by sudden market reversals.
 
-## Quick Start
+It achieves this by combining three distinct layers of intelligence:
+1.  **The Oracle (Predictive):** A Transformer Neural Network that predicts future price candles.
+2.  **The Supervisor (Strategic):** A heuristic engine that detects market regimes (Range vs. Trend).
+3.  **The Guardian (Defensive):** A PPO (Proximal Policy Optimization) Reinforcement Learning agent that manages risk and hedging parameters in real-time.
 
-### 1. Install Dependencies
-\\\ash
-pip install -r requirements.txt
-\\\
+Unlike simple "if-this-then-that" bots, AETHER builds a probabilistic model of the market every few milliseconds.
 
-### 2. Configure
-Edit \config/settings.yaml\:
-- Set broker credentials (MT5)
-- Configure risk parameters
-- Set mode to PAPER or LIVE
+---
 
-### 3. Run Bot
-\\\ash
-python run_bot.py 3600
-\\\
+## 2. System Architecture
 
-## Configuration
+The system follows a **Micro-Component Architecture** where data flows linearly through specialized processing units.
 
-### Key Settings (\config/settings.yaml\)
+```mermaid
+graph TD
+    MT5[MetaTrader 5] -->|Ticks| MD[Market Data Manager]
+    MD -->|Candles| FE[Feature Engineer]
+    FE -->|Indicators| AI[AI Core]
+    
+    subgraph AI Core
+        OR[Oracle Transformer]
+        SP[Supervisor Regime]
+        WK[Strategy Workers]
+    end
+    
+    AI -->|Signal| TE[Trading Engine]
+    TE -->|Order| RM[Risk Manager]
+    RM -->|Hedge Logic| MT5
+    
+    RM -.->|Reward/Penalty| PPO[PPO Guardian]
+    PPO -.->|Tuning| RM
+```
 
-\\\yaml
-system:
-  version: "5.5.3"
-  mode: "PAPER"  # or "LIVE"
+---
 
-trading:
-  symbol: "XAUUSD"
-  timeframe: "M1"
+## 3. Installation & Setup (A-Z)
 
-risk:
-  global_risk_percent: 2.0
-  max_drawdown_percent: 5.0
-  initial_lot: 0.01
+Follow these steps exactly to set up the bot from scratch on a fresh Windows machine.
 
-ai_parameters:
-  nexus_confidence_threshold: 0.30
-  spread_max_points: 30
-\\\
+### Step A: Prerequisites
+1.  **Install Python 3.10 or 3.11:** [Download Here](https://www.python.org/downloads/). *Ensure you check "Add Python to PATH" during installation.*
+2.  **Install MetaTrader 5:** Download from your broker (e.g., Pepperstone, IC Markets, FTMO).
+3.  **Install VS Code:** For editing and running the code.
 
-### Execution Precision (Freshness Gate)
+### Step B: MT5 Configuration
+1.  Open MetaTrader 5.
+2.  Go to **Tools -> Options -> Expert Advisors**.
+3.  Check **"Allow algorithmic trading"**.
+4.  Check **"Allow DLL imports"**.
+5.  Uncheck "Confirm" boxes to avoid popups blocking the bot.
 
-The bot can **block any NEW order** (entry/hedge/recovery) if the live feed is stale.
+### Step C: Project Setup
+1.  Open the project folder in VS Code.
+2.  Open a terminal (`Ctrl + ~`).
+3.  Create a virtual environment:
+    ```powershell
+    python -m venv .venv
+    ```
+4.  Activate the environment:
+    ```powershell
+    .venv\Scripts\activate
+    ```
+5.  Install dependencies:
+    ```powershell
+    pip install -r requirements.txt
+    ```
+    *(Note: If you have a GPU, install PyTorch with CUDA support separately for faster AI processing).*
 
-- `AETHER_ENABLE_FRESHNESS_GATE` (default `1`): master switch
-- `AETHER_FRESH_TICK_MAX_AGE_S` (default inherits `AETHER_STRICT_TICK_MAX_AGE_S`): max tick age
-- `AETHER_FRESH_CANDLE_CLOSE_MAX_AGE_S` (default `0` = auto): max age since last completed candle close
-- `AETHER_FRESHNESS_TRACE` (default `0`): throttle-log `[FRESHNESS_TRACE]` lines for verification
+### Step D: Configuration
+1.  Navigate to `config/`.
+2.  Rename `secrets.example.env` to `secrets.env` (if not already done).
+3.  Edit `secrets.env`:
+    ```env
+    MT5_LOGIN=12345678
+    MT5_PASSWORD=your_password
+    MT5_SERVER=Broker-Server-Name
+    ```
+4.  Edit `settings.yaml` to choose your symbol (e.g., `XAUUSD`) and lot size.
 
-## Architecture
+### Step E: Launch
+1.  Run the bot:
+    ```powershell
+    python run_bot.py
+    ```
+2.  You should see `>>> [SYSTEM] Bot is Running` in the console.
 
-\\\
- run_bot.py              # Entry point (adaptive sleep: 5ms-1000ms)
- main.py                 # FastAPI server (optional)
- config/
-    settings.yaml       # Main configuration
-    secrets.env         # Credentials (gitignored)
- models/
-    nexus_transformer.pth  # Trained model
-    ppo_guardian.zip       # RL model
- data/                   # Runtime state (position_state.json)
- src/
-     main_bot.py         # Bot orchestration (delegates to TradingEngine)
-     trading_engine.py   # Trading logic (branching execution)
-     position_manager.py # Position handling (async transitions)
-     risk_manager.py     # Risk controls (dual-path logic)
-     market_data.py      # Market data (ATR, trends)
-     ai_core/           # AI modules (Council, Nexus, PPO)
-     automation/        # Execution helpers
-     bridge/            # Broker adapters (MT5, CCXT)
-     infrastructure/    # Database (async queue), logging
-\\\
+---
 
-## Trading Strategy
+## 4. Configuration Guide
 
-### Single Position Flow
-1. Check existing positions  Decision branching:
-   - IF positions exist: Manage existing (skip signal)
-   - IF no positions: Continue to step 2
-2. Council analyzes market  BUY/SELL signal
-3. Execute with broker-side TP/SL
-4. Broker watches 24/7 (50ms latency)
-5. Hit TP  Instant execution
-6. Python detects close  Log results
+### `config/settings.yaml` - The Control Panel
 
-### Bucket Flow (Multiple Positions)
-1. Initial position with broker TP
-2. Price triggers zone recovery:
-   - **Dual-path trigger calculation:**
-     - Priority: Use stored triggers from hedge_plan
-     - Fallback: Dynamic PPO calculation
-3. **async transition_to_bucket():**
-   - await broker.remove_tp_sl() (with rollback)
-   - Execute hedge order
-   - Transition SINGLE_ACTIVE  BUCKET_ACTIVE
-4. Python monitoring takes over (5ms cycle)
-5. Check break-even target (net profit  0.2 ATR)
-6. Close all positions when target hit
+| Parameter | Description | Recommended |
+| :--- | :--- | :--- |
+| **`trading.symbol`** | The asset to trade. | `XAUUSD` (Gold) |
+| **`trading.timeframe`** | Candle size for analysis. | `M1` (1 Minute) |
+| **`risk.initial_lot`** | Starting trade size. | `0.01` per $1000 |
+| **`risk.zone_recovery.zone_pips`** | Distance to hedge. | `25` (250 points) |
+| **`risk.zone_recovery.tp_pips`** | Profit target. | `25` (250 points) |
+| **`ai_parameters.nexus_confidence_threshold`** | Min AI confidence to trade. | `0.30` (30%) |
 
-See BUCKET_TP_STRATEGY.md for details.
+### `config/secrets.env` - Security
+Stores sensitive data. **NEVER** share this file. It contains your broker login and database passwords.
 
-## Risk Management
+---
 
-- **Max Drawdown**: 5% (configurable)
-- **Position Limits**: Max 4 hedges per bucket
-- **Spread Filter**: Max 3.0 pips
-- **Cooldowns**: 15s between trades
-- **Emergency Stop**: At 4+ positions
+## 5. Core Logic & Data Flow
 
-## Monitoring
+### 5.1 The Tick Loop
+Located in `src/main_bot.py`, this is the heartbeat of the system.
+1.  **Wait for Tick:** The bot sleeps until MT5 reports a price change.
+2.  **Update Data:** `MarketDataManager` adds the new price to the current candle.
+3.  **Check Triggers:**
+    *   Is the candle closed? -> Run full analysis.
+    *   Is it just a tick? -> Check for Take Profit / Stop Loss logic.
 
-### Logs
-- ot_execution.log - Main bot activity
-- [TRADE] - Entry/exit execution
-- [BUCKET] - Multi-position management
-- [TP HIT] - Profit targets
-- [HEDGE] - Risk management
+### 5.2 AI Decision Making
+Located in `src/trading_engine.py`.
+1.  **Feature Extraction:** Calculates RSI, ATR, Bollinger Bands, and Z-Score.
+2.  **Regime Detection (`Supervisor`):**
+    *   *Logic:* `Volatility Ratio = Current ATR / Avg ATR`.
+    *   If `Ratio > 2.5`, Regime = **CHAOS** (Do not trade).
+    *   If `ADX > 25`, Regime = **TREND**.
+    *   Else, Regime = **RANGE**.
+3.  **Signal Generation:**
+    *   **Range Worker:** Buys when RSI < 30, Sells when RSI > 70.
+    *   **Trend Worker:** Buys when Price > EMA(50) and MACD is rising.
+4.  **Oracle Validation:** The Transformer model predicts the next candle's close. If the Worker says BUY but Oracle predicts DOWN, the trade is vetoed.
 
-### Performance
-Check session stats in logs:
-- Win rate
-- Average profit
-- Total trades
-- Sharpe ratio
+### 5.3 Risk Management (Zone Recovery)
+Located in `src/risk_manager.py`. This is the "Unbeatable" logic.
 
-## Production Checklist
+**The Algorithm:**
+1.  **Entry:** BUY 0.01 @ 2000.00. Target: 2002.50.
+2.  **Adverse Move:** Price drops to 1997.50 (Zone Boundary).
+3.  **Hedge 1:** SELL 0.02 @ 1997.50.
+    *   *New State:* Net -0.01 lots (Short bias).
+    *   *New Target:* Price drops to 1995.00.
+4.  **Reversal:** Price goes back up to 2000.00.
+5.  **Hedge 2:** BUY 0.03 @ 2000.00.
+    *   *New State:* Net +0.02 lots (Long bias).
+    *   *New Target:* Price rises to 2003.00.
+6.  **Conclusion:** The cycle continues until price breaks out of the "Zone" (1997.50 - 2000.00) far enough to close all trades for a net profit.
 
-- [ ] MT5 credentials configured
-- [ ] Mode set to PAPER for testing
-- [ ] Risk parameters validated
-- [ ] Models present in \models/\
-- [ ] Data directory writable
-- [ ] Firewall allows MT5 connection
-- [ ] Sufficient account balance
-- [ ] Backtested on paper account
+---
 
-## Troubleshooting
+## 6. AI Models Explained
 
-### Bot Not Trading
-- Check MT5 connection
-- Verify spread < 3.0 pips
-- Check confidence threshold (0.30)
-- Ensure no active positions blocking
+### The Oracle (`src/ai_core/oracle.py`)
+*   **Type:** Time-Series Transformer (Encoder-only).
+*   **Input:** Sequence of last 60 candles (Open, High, Low, Close, Volume).
+*   **Output:** Predicted % change for the next candle.
+*   **Training:** Pre-trained on 5 years of M1 Gold data.
 
-### TP Not Hitting
-- Single position: Broker manages (check MT5)
-- Bucket: Python monitors (check logs for exit conditions)
+### The Guardian (`src/ai_core/ppo_guardian.py`)
+*   **Type:** Proximal Policy Optimization (PPO).
+*   **Observation Space:** [Current Drawdown, Volatility, Trend Strength, Oracle Prediction].
+*   **Action Space:** [Hedge Multiplier (1.0-1.5), Zone Width Modifier (0.5-2.0)].
+*   **Goal:** Maximize Profit / Drawdown ratio. It learns to widen the zone during chaos and tighten it during calm.
 
-### High Drawdown
-- Reduce \global_risk_percent\
-- Increase \
-exus_confidence_threshold\
-- Check \max_layers\ in zone recovery
+---
 
-## Support
+## 7. Project Structure (Micro-Details)
 
-- Documentation: See \BUCKET_TP_STRATEGY.md\
-- Issues: GitHub Issues
-- Version: 5.5.3
+*   **`src/bridge/mt5_adapter.py`**: The low-level driver. It wraps the `MetaTrader5` Python library. It handles connection retries, order sending, and error code parsing (e.g., "Market Closed", "Not Enough Money").
+*   **`src/features/market_features.py`**: The math library. Contains optimized functions for `spread_atr`, `zscore`, `linear_regression_slope`, etc.
+*   **`src/utils/news_filter.py`**: Connects to an external API (or local JSON) to block trading 30 minutes before High Impact news (NFP, FOMC).
+*   **`data/position_state.json`**: A crash-recovery file. Every time a trade is opened, it's written here. If the PC crashes, the bot reads this file on restart to "remember" its open hedges.
 
-## License
+---
 
-MIT License - Production Trading System
+## 8. Troubleshooting
+
+| Error | Cause | Fix |
+| :--- | :--- | :--- |
+| `IPC timeout` | MT5 is closed or blocked. | Open MT5, close dialogs, enable Algo Trading. |
+| `Trade Disabled` | Broker or Account issue. | Check if you are using a read-only password or if market is closed. |
+| `Retcode 10004` | Requote. | Increase `max_slippage` in `settings.yaml`. |
+| `ImportError: torch` | PyTorch not installed. | Run `pip install torch`. |
+
+---
+
+**Disclaimer:** Trading Forex and Commodities involves high risk. This software is for educational purposes. Use at your own risk.

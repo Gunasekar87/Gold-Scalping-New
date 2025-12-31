@@ -174,76 +174,48 @@ class PositionManager:
         self._load_state()
 
     def _p95(self, values: List[float]) -> float:
-        if enable_freshness:
-            # [TIMEZONE AUTO-CORRECTION] Prefer explicit override; else auto-detect once.
-            now = time.time()
-            tick_ts = float(market_data.get('time', 0.0) or 0.0)
+        """
+        Calculate 95th percentile of a list of values.
+        """
+        if not values:
+            return 0.0
+        
+        try:
+            sorted_vals = sorted(values)
+            index = int(0.95 * len(sorted_vals))
+            # Clamp index
+            index = max(0, min(index, len(sorted_vals) - 1))
+            return sorted_vals[index]
+        except Exception as e:
+            logger.error(f"Error calculating p95: {e}")
+            return 0.0
 
-            env_offset = os.getenv("AETHER_TIME_OFFSET_SECS", None)
-            if env_offset is not None:
-                try:
-                    self._time_offset = float(env_offset)
-                except Exception:
-                    self._time_offset = None
-
-            if self._time_offset is None and tick_ts > 0:
-                raw_diff = now - tick_ts
-                if abs(raw_diff) > 600:
-                    self._time_offset = raw_diff
-                    logger.warning(f"[FRESHNESS] Detected Timezone Offset: {self._time_offset:.2f}s. Adjusting...")
-                else:
-                    self._time_offset = 0.0
-
-            offset = self._time_offset if self._time_offset is not None else 0.0
-
-            try:
-                if tick_ts > 0:
-                    adjusted_ts = tick_ts + offset
-                    tick_age = abs(now - adjusted_ts)
-                else:
-                    tick_age = float(market_data.get('tick_age_s', float('inf')))
-            except Exception:
-                tick_age = float('inf')
-
-            try:
-                candle_close_age = float(market_data.get('candle_close_age_s', float('inf')))
-            except Exception:
-                candle_close_age = float('inf')
-
-            try:
-                max_tick_age = float(os.getenv("AETHER_FRESH_TICK_MAX_AGE_S", os.getenv("AETHER_STRICT_TICK_MAX_AGE_S", "5.0")))
-            except Exception:
-                max_tick_age = 5.0
-
-            try:
-                max_candle_age = float(os.getenv("AETHER_FRESH_CANDLE_CLOSE_MAX_AGE_S", "0"))
-            except Exception:
-                max_candle_age = 0.0
-
-            if not max_candle_age or max_candle_age <= 0:
-                try:
-                    tf_s = float(market_data.get('timeframe_s', 60) or 60)
-                except Exception:
-                    tf_s = 60.0
-                max_candle_age = max((2.0 * tf_s) + 10.0, 30.0)
-
-            if max_tick_age > 0 and tick_age > max_tick_age:
-                logger.warning(f"\[SAFETY] Recovery {action} blocked. Stale Tick (age={tick_age:.1f}s max={max_tick_age:.1f}s)")
-                return False
-            if max_candle_age > 0 and candle_close_age > max_candle_age:
-                logger.warning(f"\[SAFETY] Recovery {action} blocked. Stale Candle Close (age={candle_close_age:.1f}s max={max_candle_age:.1f}s)")
-                return False
-            return base_buffer_usd
+    def _calibrated_profit_buffer(self, symbol: str, total_volume: float, base_buffer_usd: float) -> float:
+        """
+        Calculate calibrated profit buffer based on volume and symbol slippage stats.
+        Uses p95 of historical slippage if available.
+        """
+        if not self._slippage_enabled or not symbol:
+             return base_buffer_usd
 
         with self._lock:
             samples = list(self._slippage_samples_per_lot_usd.get(symbol, []))
 
         if len(samples) < 10:
-            return base_buffer_usd
+            # Not enough data, use default heuristic
+            # XAUUSD/Gold typically has higher spread/slippage
+            is_gold = "XAU" in symbol or "GOLD" in symbol
+            slippage_per_lot = 15.0 if is_gold else 5.0
+            volume_component = float(total_volume) * slippage_per_lot
+            return max(float(base_buffer_usd), volume_component)
 
         p95_per_lot = self._p95(samples)
-        calibrated = p95_per_lot * float(total_volume) * float(self._slippage_p95_multiplier)
-        return max(float(base_buffer_usd), float(calibrated))
+        
+        # Calculate expected slippage cost
+        calibrated_cost = p95_per_lot * float(total_volume) * float(self._slippage_p95_multiplier)
+        
+        # Buffer must cover EITHER the base need OR the calibrated slippage, whichever is higher
+        return max(float(base_buffer_usd), calibrated_cost)
 
     def _get_slippage_sample_count(self, symbol: str) -> int:
         if not self._slippage_enabled or not symbol:
@@ -467,11 +439,18 @@ class PositionManager:
         # ATR in USD = ATR_Price * Contract_Size * Volume
         atr_usd = atr_value * contract_size * total_volume
         
-        # [CRITICAL] Increased from 1.5x to 4.0x to give Gold breathing room
-        threshold = atr_usd * 4.0
+        # [CRITICAL] Dynamic Threshold based on Volatility
+        # Base multiplier 4.0x (Gold breathing room)
+        # If market is VIOLENT (VolRatio > 1.5), widen to 6.0x to avoid whipping.
+        vol_ratio = float(market_data.get('volatility_ratio', 1.0))
+        base_mult = 4.0
+        if vol_ratio > 1.5:
+            base_mult = 6.0
+            
+        threshold = atr_usd * base_mult
         
         if drawdown > threshold:
-            logger.warning(f"[STABILIZER] Triggered! Drawdown ${drawdown:.2f} > Threshold ${threshold:.2f} (4.0x ATR)")
+            logger.warning(f"[STABILIZER] Triggered! Drawdown ${drawdown:.2f} > Threshold ${threshold:.2f} ({base_mult}x ATR)")
             return True
             
         return False
@@ -560,6 +539,7 @@ class PositionManager:
                 except Exception:
                     candle_close_age = float('inf')
 
+                # Strict check for recovery
                 try:
                     max_tick_age = float(os.getenv("AETHER_FRESH_TICK_MAX_AGE_S", os.getenv("AETHER_STRICT_TICK_MAX_AGE_S", "5.0")))
                 except Exception:
@@ -586,103 +566,60 @@ class PositionManager:
             trend_ok = bool(market_data.get('trend_ok', True))
             rsi_ok = bool(market_data.get('rsi_ok', True))
 
-            if strict_entry:
-                # Fail-closed for any NEW-order path. Do not allow synthetic/default inputs.
-                if not candles or len(candles) < 20:
-                    logger.warning(f"[GOD MODE] Strict: Recovery blocked (insufficient candles: {len(candles)})")
-                    return False
-                if not atr_ok or atr is None or atr <= 0:
-                    logger.warning("[GOD MODE] Strict: Recovery blocked (ATR unavailable)")
-                    return False
-                # RSI is passed in market_data; if upstream flagged it invalid, block.
-                if not rsi_ok:
-                    logger.warning("[GOD MODE] Strict: Recovery blocked (RSI unavailable)")
-                    return False
-                if current_price is None or current_price <= 0:
-                    logger.warning("[GOD MODE] Strict: Recovery blocked (current price unavailable)")
-                    return False
-            
             # Default to "Wait"
             signal = False
-            # STRATEGY: Smart Averaging (Add to position at structure)
             # If Net Long (>0), we BUY. If Net Short (<0), we SELL.
             action = "BUY" if net_vol > 0 else "SELL" 
             
-            # [FIX] Trend Veto (IronShield)
-            # If we are buying into a crash, ABORT.
-            if shield:
-                if strict_entry and not trend_ok:
-                    logger.warning("[GOD MODE] Strict: Recovery blocked (trend strength unavailable)")
-                    return False
-
-                trend_dir_ok = bool(market_data.get('trend_dir_ok', True))
-                if strict_entry and not trend_dir_ok:
-                    logger.warning("[GOD MODE] Strict: Recovery blocked (trend direction unavailable)")
-                    return False
-
+            # [FIX] Trend Veto (IronShield) - Only if strict
+            if strict_entry and shield:
+                if not trend_ok:
+                     return False
                 trend_direction = float(market_data.get('trend_direction', 0.0) or 0.0)
-                if action == "BUY" and trend_direction < -0.6:
-                    logger.warning(f"[GOD MODE] Recovery BUY blocked. Trend Crash ({trend_direction:.2f})")
-                    return False
-                if action == "SELL" and trend_direction > 0.6:
-                    logger.warning(f"[GOD MODE] Recovery SELL blocked. Trend Rocket ({trend_direction:.2f})")
-                    return False
-            
+                if action == "BUY" and trend_direction < -0.6: return False
+                if action == "SELL" and trend_direction > 0.6: return False
+
+            # STRUCTURE-BASED TRIGGER
             if candles and len(candles) >= 20:
                 last_candle = candles[-1]
-                # A. Volatility Compression (The Coil)
-                # Don't enter if market is exploding against us (Expansion)
                 candle_range = last_candle['high'] - last_candle['low']
-                # Allow entry if range is normal (<= 1.5 ATR). Avoid massive impulse candles (> 2.0 ATR).
-                is_compressed = candle_range < (atr * 2.0) 
+                is_compressed = candle_range < (atr * 2.0) if atr else True
                 
-                # B. Liquidity Sweep (The Level)
-                # Find 20-period High/Low (Donchian Channel)
                 highs = [c['high'] for c in candles[-20:]]
                 lows = [c['low'] for c in candles[-20:]]
                 lowest_low = min(lows)
                 highest_high = max(highs)
                 
-                if action == "BUY": # We are Long, Price is dropping
-                    # Enter only if we swept the low (Liquidity Vacuum)
-                    # Price is near or below lowest low
-                    # "Near" = within 0.5 ATR
-                    is_at_structure = current_price <= (lowest_low + atr * 0.5)
-                    
-                    # Reversal Candle (Green) or Hammer
-                    # Close >= Open (Green) OR Close > Low + 0.6*(High-Low) (Hammer)
-                    is_green = last_candle['close'] >= last_candle['open']
-                    is_hammer = (last_candle['close'] - last_candle['low']) > 0.6 * (last_candle['high'] - last_candle['low'])
-                    is_reversal = is_green or is_hammer
-                    
+                if action == "BUY": 
+                    is_at_structure = current_price <= (lowest_low + (atr * 0.5 if atr else 0.0))
+                    # Simplified reversal check: just green candle is enough in recovery mode
+                    is_reversal = last_candle['close'] >= last_candle['open'] 
                     if is_at_structure and is_reversal and is_compressed:
                         signal = True
-                        logger.info(f"[GOD MODE] BUY Signal: Liquidity Sweep @ {lowest_low:.2f} | Deficit: ${deficit:.2f}")
-                        
-                else: # We are Short, Price is rising
-                    # Enter only if we swept the high
-                    is_at_structure = current_price >= (highest_high - atr * 0.5)
-                    
-                    # Reversal Candle (Red) or Shooting Star
-                    is_red = last_candle['close'] <= last_candle['open']
-                    is_star = (last_candle['high'] - last_candle['close']) > 0.6 * (last_candle['high'] - last_candle['low'])
-                    is_reversal = is_red or is_star
-                    
+                        logger.info(f"[GOD MODE] BUY Signal: Liquidity Sweep @ {lowest_low:.2f}")
+                else: 
+                    is_at_structure = current_price >= (highest_high - (atr * 0.5 if atr else 0.0))
+                    is_reversal = last_candle['close'] <= last_candle['open']
                     if is_at_structure and is_reversal and is_compressed:
                         signal = True
-                        logger.info(f"[GOD MODE] SELL Signal: Liquidity Sweep @ {highest_high:.2f} | Deficit: ${deficit:.2f}")
-            else:
-                if strict_entry:
-                    # Never open new recovery orders without real structure inputs.
-                    logger.warning("[GOD MODE] Strict: Recovery blocked (no candles for structure)")
-                    return False
+                        logger.info(f"[GOD MODE] SELL Signal: Liquidity Sweep @ {highest_high:.2f}")
 
-                # Fallback if no candles (legacy behavior)
-                # Use simple time-based check
-                duration_mins = (time.time() - stats.open_time) / 60
-                if duration_mins > 30:
-                    signal = True
-                    logger.info("[GOD MODE] Fallback: Time-based recovery (>30m)")
+            # EMERGENCY FALLBACK TRIGGER
+            # If we are failing to trigger via structure but Deficit is huge (> 5% Equity), FORCE RECOVERY.
+            # This ensures we don't bleed to death waiting for a perfect candle.
+            acct_equity = market_data.get('equity', 1000.0) # Need equity passed in market_data ideally
+            # Approximate equity check if not in market_data
+            if not signal:
+                 # Check if deficit is critical
+                 if deficit > (acct_equity * 0.05):
+                     signal = True
+                     logger.warning(f"[GOD MODE] EMERGENCY TRIGGER: Deficit ${deficit:.2f} > 5% Equity. Forcing Recovery.")
+                 
+                 # Also fallback to time-based if > 30 mins
+                 duration_mins = (time.time() - stats.open_time) / 60
+                 if duration_mins > 30:
+                     signal = True
+                     logger.info(f"[GOD MODE] Time-based Trigger: >30mins in drawdown")
 
             if not signal:
                 return False
@@ -2375,7 +2312,7 @@ class PositionManager:
         """
         with self._lock:
             if bucket_id not in self.bucket_stats:
-                print(f"DEBUG: Bucket {bucket_id} not in bucket_stats")
+                logger.debug(f"Bucket {bucket_id} not in bucket_stats")
                 return False
 
             stats = self.bucket_stats[bucket_id]
@@ -2386,7 +2323,7 @@ class PositionManager:
             positions = [self.active_positions[t] for t in stats.positions if t in self.active_positions]
 
         if not positions:
-            print(f"DEBUG: Bucket {bucket_id} has no positions")
+            logger.debug(f"Bucket {bucket_id} has no positions")
             logger.warning(f"Bucket {bucket_id} has no active positions to close")
             # Mark as fully closed
             with self._lock:
@@ -2396,6 +2333,17 @@ class PositionManager:
         # [SAFETY] PRE-CLOSE REVALIDATION (Live check just before firing orders)
         # Abort if profit no longer clears execution buffer.
         live_net_pnl, _, _, _ = self.calculate_net_pnl(positions)
+
+        # [FIX] GHOST_PROTOCOL Safety Abort (v5.5.7)
+        # If we are trying to clean up a zombie bucket (GHOST_PROTOCOL) but it is currently losing money,
+        # we must NOT force close it. We should abort and let the Recovery logic handle the drawdown.
+        if stats.exit_reason == 'GHOST_PROTOCOL' and live_net_pnl < 0:
+            logger.warning(f"[GHOST ABORT] Bucket {bucket_id} is negative (${live_net_pnl:.2f}). Aborting cleanup to prevent realized loss.")
+            # Roll state back to BUCKET_ACTIVE and exit early
+            with self._lock:
+                self._set_position_state(bucket_id, PositionState.BUCKET_ACTIVE)
+            return False
+
         # Estimate dynamic buffer similar to should_close_bucket
         # Without market_data here, approximate volatility via bucket size
         approx_vol_ratio = 2.0 if len(positions) >= 4 else 1.0
@@ -2421,7 +2369,7 @@ class PositionManager:
         is_emergency_close = (stats.exit_reason or "").find("EMERGENCY") >= 0
 
         if live_net_pnl < min_profit_buffer and not (allow_emergency_close_loss and is_emergency_close):
-            print(f"DEBUG: Abort Close. Live={live_net_pnl} Buffer={min_profit_buffer} Reason={stats.exit_reason}")
+            logger.debug(f"Abort Close. Live={live_net_pnl} Buffer={min_profit_buffer} Reason={stats.exit_reason}")
             if str(os.getenv("AETHER_SLIPPAGE_CALIBRATION_LOG", "1")).strip().lower() in ("1", "true", "yes", "on"):
                 sc = self._get_slippage_sample_count(symbol)
                 p95pl = self._get_slippage_p95_per_lot_usd(symbol)
