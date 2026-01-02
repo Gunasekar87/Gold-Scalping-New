@@ -1526,14 +1526,20 @@ class PositionManager:
             
             # [PHASE 2] GHOST PROTOCOL: Predictive Exit
             # Logic: If Profit > 80% of Target AND Momentum Drops -> CLOSE
+            # CRITICAL FIX: Use NET P&L of entire bucket, not just first position
             ghost_exit = False
             ghost_reason = ""
             
-            # Calculate current profit in pips
-            if first_pos.is_buy:
-                current_pips = (current_price - entry_price) * pip_multiplier
+            # Calculate current profit in pips FOR THE ENTIRE BUCKET (not just first position)
+            # For hedged buckets, we must use NET P&L, not individual position pips
+            contract_size = 100 if "XAU" in first_pos.symbol or "GOLD" in first_pos.symbol else 100000
+            total_volume = sum(pos.volume for pos in positions)
+            
+            # Convert NET P&L to pips equivalent
+            if total_volume > 0:
+                current_pips = (net_pnl / (total_volume * contract_size)) * pip_multiplier
             else:
-                current_pips = (entry_price - current_price) * pip_multiplier
+                current_pips = 0.0
                 
             # Get Target Pips (prefer stored entry TP; only fall back to ATR if ATR is valid)
             target_pips = 0.0
@@ -1542,7 +1548,12 @@ class PositionManager:
             elif atr_value is not None and float(atr_value) > 0:
                 target_pips = float(atr_value) * pip_multiplier * 0.3
             
-            if target_pips > 0 and current_pips > (target_pips * 0.8):
+            # CRITICAL: Only trigger Ghost Protocol if:
+            # 1. We have a valid target
+            # 2. Current pips are POSITIVE (in profit)
+            # 3. Current pips are > 80% of target
+            # 4. Momentum is fading
+            if target_pips > 0 and current_pips > 0 and current_pips > (target_pips * 0.8):
                 # Check Momentum (OBI or RSI)
                 obi_ok = bool(market_data.get('obi_ok', False)) if market_data else False
                 obi = float(market_data.get('obi', 0.0) or 0.0) if (market_data and obi_ok) else None
@@ -1563,7 +1574,7 @@ class PositionManager:
                         ghost_reason = f"Ghost Protocol (OBI={obi_str}, RSI={(float(rsi)):.1f}" if rsi is not None else f"Ghost Protocol (OBI={obi_str}, RSI=NA)"
             
             if ghost_exit:
-                logger.info(f"[GHOST PROTOCOL] Triggered! {ghost_reason} | Profit: {current_pips:.1f}/{target_pips:.1f} pips")
+                logger.info(f"[GHOST PROTOCOL] Triggered! {ghost_reason} | Net Profit: {current_pips:.1f}/{target_pips:.1f} pips | Bucket P&L: ${net_pnl:.2f}")
                 stats.exit_reason = "GHOST_PROTOCOL"
                 return True, 1.0
 
