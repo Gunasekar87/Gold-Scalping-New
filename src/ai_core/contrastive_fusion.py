@@ -67,11 +67,11 @@ class ContrastiveFusion:
                 now = time.monotonic()
                 if now - self._last_conflict_log_ts >= self._conflict_log_interval_s:
                     if self._conflict_suppressed:
-                        logger.warning(
+                        logger.debug(
                             f"[FUSION] Signal Conflict Detected (throttled): {self._conflict_suppressed} repeats suppressed"
                         )
                         self._conflict_suppressed = 0
-                    logger.warning(f"[FUSION] Signal Conflict Detected: {signals}")
+                    logger.debug(f"[FUSION] Signal Conflict Detected: {signals}")
                     self._last_conflict_log_ts = now
                 else:
                     self._conflict_suppressed += 1

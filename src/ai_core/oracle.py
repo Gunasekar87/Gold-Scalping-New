@@ -234,13 +234,18 @@ class Oracle:
         coherence = self.fusion.compute_coherence(signals)
         final_confidence = self.fusion.validate_signal(ai_score, coherence)
 
-        # Log the AI Council deliberation
+        # Log the AI Council deliberation (only for actual signals, not every tick)
         if str(os.getenv("AETHER_ORACLE_FUSION_DEBUG", "0")).strip().lower() in ("1", "true", "yes", "on"):
             logger.info(
                 f"[ORACLE] Council: Macro({macro_signal:.2f}) | Micro({ai_score:.2f}) | Pressure({pressure_score:.2f}, raw={pressure_val:.2f}) | OBI({float(order_book_signal):.2f}) -> Coherence: {coherence:.2f}"
             )
-        else:
+        elif abs(ai_score) > 0.5 or coherence > 0.7:  # Only log when there's a strong signal
             logger.info(
+                f"[ORACLE] Strong Signal: Micro({ai_score:.2f}) | Pressure({pressure_score:.2f}) -> Coherence: {coherence:.2f}"
+            )
+        else:
+            # Suppress routine deliberations - use debug level
+            logger.debug(
                 f"[ORACLE] Council: Macro({macro_signal:.2f}) | Micro({ai_score:.2f}) | Pressure({pressure_score:.2f}) -> Coherence: {coherence:.2f}"
             )
 
