@@ -5,7 +5,7 @@ system:
 
 trading:
   broker_type: "MT5" # Options: "MT5", "BINANCE", "BYBIT", "MOCK"
-  symbol: "XAUUSD" # Recommended: [BTCUSD, ETHUSD, SOLUSD, BNBUSD, XRPUSD, DOGEUSD, EURUSD, GBPUSD, USDJPY, XAUUSD, XAGUSD, USOIL]
+  symbol: "XAUUSD" # Confirmed: Broker uses uppercase (verified by diagnostic tool)
   timeframe: "M1" # CHANGED TO M1 FOR HFT/SCALPING
   magic_number: 888888
   max_slippage: 5
