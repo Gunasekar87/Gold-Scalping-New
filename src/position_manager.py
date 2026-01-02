@@ -19,11 +19,19 @@ import os
 import math
 import asyncio
 from collections import deque
-from typing import Dict, List, Optional, Any, Set, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Callable
 from dataclasses import dataclass, field
 from threading import Lock, RLock
 from enum import Enum
 import MetaTrader5 as mt5
+
+# Import enhanced trade explainer for detailed logging
+try:
+    from .utils.trade_explainer import TradeExplainer
+    EXPLAINER_AVAILABLE = True
+except ImportError:
+    EXPLAINER_AVAILABLE = False
+
 from .ai_core.architect import Architect
 
 # Import TradingLogger for structured exit summaries
@@ -2606,10 +2614,6 @@ class PositionManager:
         
         # Calculate pips (approximate)
         pip_multiplier = 100 if "XAU" in symbol or "GOLD" in symbol else 10000
-        # We need exit price to calculate pips accurately, but we haven't closed yet.
-        # We can estimate using current tick from broker if available, or just use PnL/Volume approximation
-        # Approx Pips = (PnL / (Volume * ContractSize)) * Multiplier
-        # Contract Size: 100 for Gold, 100000 for Forex
         contract_size = 100 if "XAU" in symbol or "GOLD" in symbol else 100000
         try:
             total_pips = (total_pnl / (total_volume * contract_size)) * pip_multiplier if total_volume > 0 else 0.0
@@ -2618,40 +2622,49 @@ class PositionManager:
 
         exit_reason = stats.exit_reason if stats.exit_reason else "PROFIT"
         
-        # Enhanced Summary with AI Plan
-        msg = (
-            f"\n>>> [AI EXIT PLAN] CLOSING BUCKET <<<\n"
-            f"Symbol:          {symbol}\n"
-            f"Reason:          {exit_reason}\n"
-            f"Plan:            Close {len(positions)} positions to secure ${total_pnl:.2f}\n"
-            f"Duration:        {duration_str}\n"
-            f"Total PnL:       ${total_pnl:.2f} ({total_pips:+.1f} pips)\n"
-            f"Volume:          {total_volume:.2f} lots\n"
-            f"Status:          EXECUTING NOW...\n"
-            f"----------------------------------------------------"
-        )
-        
-        # [FIX] Windows Console Compatibility - Force clean version on Windows
-        clean_msg = (
-            f"\n>>> [AI EXIT PLAN] CLOSING BUCKET <<<\n"
-            f"Symbol:          {symbol}\n"
-            f"Reason:          {exit_reason}\n"
-            f"Plan:            Close {len(positions)} positions to secure ${total_pnl:.2f}\n"
-            f"Duration:        {duration_str}\n"
-            f"Total PnL:       ${total_pnl:.2f} ({total_pips:+.1f} pips)\n"
-            f"Volume:          {total_volume:.2f} lots\n"
-            f"Status:          EXECUTING NOW...\n"
-            f"----------------------------------------------------"
-        )
-        
-        import sys
-        if sys.platform == 'win32':
-            ui_logger.info(clean_msg)
-        else:
+        # Generate detailed trader-friendly explanation
+        if EXPLAINER_AVAILABLE:
             try:
-                ui_logger.info(msg)
-            except Exception:
+                explainer = TradeExplainer()
+                explanation = explainer.explain_bucket_close(
+                    symbol=symbol,
+                    positions=positions,
+                    total_pnl=total_pnl,
+                    total_volume=total_volume,
+                    bucket_duration=bucket_duration,
+                    exit_reason=exit_reason,
+                    ai_metrics=None
+                )
+                print(explanation, flush=True)
+            except Exception as e:
+                logger.warning(f"[EXPLAINER] Failed to generate detailed explanation: {e}")
+                # Fallback to simple summary
+                clean_msg = (
+                    f"\n>>> [AI EXIT PLAN] CLOSING BUCKET <<<\n"
+                    f"Symbol:          {symbol}\n"
+                    f"Reason:          {exit_reason}\n"
+                    f"Plan:            Close {len(positions)} positions to secure ${total_pnl:.2f}\n"
+                    f"Duration:        {duration_str}\n"
+                    f"Total PnL:       ${total_pnl:.2f} ({total_pips:+.1f} pips)\n"
+                    f"Volume:          {total_volume:.2f} lots\n"
+                    f"Status:          EXECUTING NOW...\n"
+                    f"----------------------------------------------------"
+                )
                 ui_logger.info(clean_msg)
+        else:
+            # Fallback if explainer not available
+            clean_msg = (
+                f"\n>>> [AI EXIT PLAN] CLOSING BUCKET <<<\n"
+                f"Symbol:          {symbol}\n"
+                f"Reason:          {exit_reason}\n"
+                f"Plan:            Close {len(positions)} positions to secure ${total_pnl:.2f}\n"
+                f"Duration:        {duration_str}\n"
+                f"Total PnL:       ${total_pnl:.2f} ({total_pips:+.1f} pips)\n"
+                f"Volume:          {total_volume:.2f} lots\n"
+                f"Status:          EXECUTING NOW...\n"
+                f"----------------------------------------------------"
+            )
+            ui_logger.info(clean_msg)
 
         # [INTELLIGENCE] Clear High Water Mark Memory
         self.high_water_marks.pop(bucket_id, None)

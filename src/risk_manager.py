@@ -22,6 +22,13 @@ from typing import Dict, List, Optional, Any, Tuple, Set, Callable
 from dataclasses import dataclass
 from enum import Enum
 
+# Import enhanced trade explainer for detailed logging
+try:
+    from .utils.trade_explainer import TradeExplainer
+    EXPLAINER_AVAILABLE = True
+except ImportError:
+    EXPLAINER_AVAILABLE = False
+
 logger = logging.getLogger("RiskManager")
 
 # Setup UI Logger for console output (Shared with Main Bot)
@@ -878,15 +885,42 @@ class RiskManager:
             # Now safe to do slower operations
             logger.info(f"[HEDGE] SUCCESS: Ticket #{result['ticket']} executed at {target_price:.5f}")
             
-            # Log hedge execution plan details (UI LOGGER)
-            ai_reason = f"Zone Breach ({zone_width_points/point:.0f} pts). VolRatio: {volatility_ratio:.2f}"
-            
-            ui_logger.info(f"\n=== HEDGE {len(positions) + 1} EXECUTED ===")
-            ui_logger.info(f"Hedge {len(positions) + 1}:       {hedge_lot:.2f} lots @ {target_price:.5f}")
-            ui_logger.info(f"Type:          {next_action}")
-            ui_logger.info(f"AI Reason:     {ai_reason}")
-            ui_logger.info(f"Context:       Zone={zone_width_points/point:.1f} pips | TP={tp_width_points/point:.1f} pips")
-            ui_logger.info(f"==================================")
+            # Generate detailed trader-friendly explanation
+            if EXPLAINER_AVAILABLE:
+                try:
+                    explainer = TradeExplainer()
+                    explanation = explainer.explain_hedge_placement(
+                        symbol=symbol,
+                        hedge_type=next_action,
+                        hedge_lots=hedge_lot,
+                        hedge_price=target_price,
+                        initial_position=first_pos,
+                        zone_width_pips=zone_width_points/point,
+                        atr_value=atr_val,
+                        rsi_value=rsi_value,
+                        volatility_ratio=volatility_ratio,
+                        hedge_level=len(positions) + 1
+                    )
+                    print(explanation, flush=True)
+                except Exception as e:
+                    logger.warning(f"[EXPLAINER] Failed to generate detailed explanation: {e}")
+                    # Fallback to simple logging
+                    ai_reason = f"Zone Breach ({zone_width_points/point:.0f} pts). VolRatio: {volatility_ratio:.2f}"
+                    ui_logger.info(f"\n=== HEDGE {len(positions) + 1} EXECUTED ===")
+                    ui_logger.info(f"Hedge {len(positions) + 1}:       {hedge_lot:.2f} lots @ {target_price:.5f}")
+                    ui_logger.info(f"Type:          {next_action}")
+                    ui_logger.info(f"AI Reason:     {ai_reason}")
+                    ui_logger.info(f"Context:       Zone={zone_width_points/point:.1f} pips | TP={tp_width_points/point:.1f} pips")
+                    ui_logger.info(f"==================================")
+            else:
+                # Fallback if explainer not available
+                ai_reason = f"Zone Breach ({zone_width_points/point:.0f} pts). VolRatio: {volatility_ratio:.2f}"
+                ui_logger.info(f"\n=== HEDGE {len(positions) + 1} EXECUTED ===")
+                ui_logger.info(f"Hedge {len(positions) + 1}:       {hedge_lot:.2f} lots @ {target_price:.5f}")
+                ui_logger.info(f"Type:          {next_action}")
+                ui_logger.info(f"AI Reason:     {ai_reason}")
+                ui_logger.info(f"Context:       Zone={zone_width_points/point:.1f} pips | TP={tp_width_points/point:.1f} pips")
+                ui_logger.info(f"==================================")
 
             # Remove TP/SL from additional positions (for hedges beyond the first)
             # First hedge TP/SL already removed above in atomic transition
