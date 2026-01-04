@@ -5,10 +5,17 @@ class TickPressureAnalyzer:
     """
     "Holographic" Market View: Simulates Order Flow (Level 2) using Tick Velocity.
     Detects Institutional Aggression vs Retail Noise.
+    
+    ENHANCEMENT 2: Added Order Flow Imbalance Analysis (Jan 4, 2026)
     """
     def __init__(self, window_seconds=5):
         self.window_seconds = window_seconds
         self.ticks = deque() # Stores (price, time)
+        
+        # ENHANCEMENT 2: Order Flow Imbalance Tracking
+        self.buy_volume_buffer = deque(maxlen=100)
+        self.sell_volume_buffer = deque(maxlen=100)
+        self.max_buffer_size = 100
         
     def add_tick(self, tick):
         """
@@ -102,3 +109,106 @@ class TickPressureAnalyzer:
             'state': state,
             'velocity': velocity
         }
+    
+    # ============================================================================
+    # ENHANCEMENT 2: Order Flow Imbalance Analysis
+    # Added: January 4, 2026
+    # Purpose: Detect buy vs sell aggressor volume for better entry timing
+    # ============================================================================
+    
+    def analyze_order_flow(self, tick):
+        """
+        Analyze buy vs sell volume imbalance from tick data.
+        
+        Detects aggressor side (who crossed the spread) and tracks volume imbalance.
+        
+        Args:
+            tick: Dictionary with 'last', 'bid', 'ask', 'volume' keys
+            
+        Returns:
+            Dictionary with:
+            - order_flow_imbalance: -1 to 1 (negative = sell pressure, positive = buy pressure)
+            - buy_pressure: Ratio of buy volume (0-1)
+            - sell_pressure: Ratio of sell volume (0-1)
+        """
+        if not tick:
+            return {
+                'order_flow_imbalance': 0.0,
+                'buy_pressure': 0.5,
+                'sell_pressure': 0.5
+            }
+        
+        try:
+            last_price = tick.get('last', tick.get('bid', 0))
+            bid = tick.get('bid', 0)
+            ask = tick.get('ask', 0)
+            volume = tick.get('volume', 1)
+            
+            # Detect aggressor side (who crossed the spread)
+            # If last price >= ask, it's a buy aggressor (market buy order)
+            # If last price <= bid, it's a sell aggressor (market sell order)
+            
+            if last_price >= ask and ask > 0:
+                # Buy aggressor - someone hit the ask
+                self.buy_volume_buffer.append(volume)
+            elif last_price <= bid and bid > 0:
+                # Sell aggressor - someone hit the bid
+                self.sell_volume_buffer.append(volume)
+            else:
+                # Mid-price trade or limit order fill - neutral
+                # Add half to each side
+                self.buy_volume_buffer.append(volume / 2)
+                self.sell_volume_buffer.append(volume / 2)
+            
+            # Calculate imbalance from buffers
+            buy_vol = sum(self.buy_volume_buffer) if self.buy_volume_buffer else 0
+            sell_vol = sum(self.sell_volume_buffer) if self.sell_volume_buffer else 0
+            total_vol = buy_vol + sell_vol
+            
+            if total_vol > 0:
+                # Imbalance: -1 (all sell) to +1 (all buy)
+                imbalance = (buy_vol - sell_vol) / total_vol
+                buy_pressure = buy_vol / total_vol
+                sell_pressure = sell_vol / total_vol
+            else:
+                imbalance = 0.0
+                buy_pressure = 0.5
+                sell_pressure = 0.5
+            
+            return {
+                'order_flow_imbalance': float(imbalance),
+                'buy_pressure': float(buy_pressure),
+                'sell_pressure': float(sell_pressure),
+                'buy_volume': float(buy_vol),
+                'sell_volume': float(sell_vol)
+            }
+            
+        except Exception as e:
+            # On error, return neutral
+            return {
+                'order_flow_imbalance': 0.0,
+                'buy_pressure': 0.5,
+                'sell_pressure': 0.5
+            }
+    
+    def get_combined_analysis(self, tick, point_value=0.01):
+        """
+        Get both pressure metrics and order flow analysis in one call.
+        
+        Args:
+            tick: Current tick data
+            point_value: Point value for pressure calculation
+            
+        Returns:
+            Combined dictionary with all metrics
+        """
+        pressure = self.get_pressure_metrics(point_value)
+        order_flow = self.analyze_order_flow(tick)
+        
+        # Combine both analyses
+        combined = {
+            **pressure,
+            **order_flow
+        }
+        
+        return combined
