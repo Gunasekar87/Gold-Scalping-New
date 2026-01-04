@@ -1,13 +1,17 @@
 @echo off
 REM AETHER Trading System - Quick Start
 REM Version 5.5.3
-
-echo ========================================
-echo AETHER Trading System v5.5.3
-echo ========================================
+@echo off
+echo ================================================
+echo    AETHER Trading Bot v5.5.6
+echo    Production-Ready AI Trading System
+echo ================================================
 echo.
 
-REM Check if virtual environment exists
+REM [CRITICAL FIX] Set timezone offset for MT5 server (fixes freshness gate)
+set AETHER_TIME_OFFSET_SECS=7196
+
+REM Activate virtual environment exists
 if not exist .venv (
     echo Creating virtual environment...
     python -m venv .venv
