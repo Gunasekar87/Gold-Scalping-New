@@ -207,16 +207,48 @@ class TradingEngine:
         # Track last cooldown log time
         self._last_cooldown_log_time = 0.0
 
+        # ENHANCEMENT 7: Comprehensive Performance Tracking
         # Statistics
         self.session_stats = {
+            # Basic counters
             "trades_opened": 0,
             "trades_closed": 0,
             "total_profit": 0.0,
             "win_rate": 0.0,
             "start_time": time.time(),
+            
             # Learning/optimization metrics
             "equity_peak": None,
             "max_drawdown_pct": 0.0,
+            
+            # ENHANCEMENT 7: Detailed Performance Metrics
+            "wins": 0,
+            "losses": 0,
+            "breakeven": 0,
+            "avg_win": 0.0,
+            "avg_loss": 0.0,
+            "largest_win": 0.0,
+            "largest_loss": 0.0,
+            "profit_factor": 0.0,
+            "sharpe_ratio": 0.0,
+            
+            # Streak tracking
+            "consecutive_wins": 0,
+            "consecutive_losses": 0,
+            "max_consecutive_wins": 0,
+            "max_consecutive_losses": 0,
+            
+            # Trade duration tracking
+            "trade_durations": [],
+            "avg_trade_duration_seconds": 0.0,
+            "min_trade_duration": 0.0,
+            "max_trade_duration": 0.0,
+            
+            # Returns for Sharpe calculation
+            "returns": [],
+            
+            # Hourly performance
+            "hourly_pnl": {},
         }
 
         # End-of-session optimization metrics (profit + stability)
@@ -225,6 +257,7 @@ class TradingEngine:
         self._last_equity_check_ts: float = 0.0
 
         logger.info(f"TradingEngine initialized for {config.symbol}")
+        logger.info("[ENHANCEMENT 7] Advanced performance tracking enabled")
 
     def _log_entry_gate(self, reason: str) -> None:
         """Throttled log for strict entry gating (avoids spam)."""
@@ -440,6 +473,129 @@ class TradingEngine:
             self.session_stats["max_drawdown_pct"] = float(self._max_drawdown_pct)
         except Exception:
             return
+    
+    # ============================================================================
+    # ENHANCEMENT 7: Performance Metrics Update
+    # Added: January 4, 2026
+    # Purpose: Track detailed performance statistics for each closed trade
+    # ============================================================================
+    
+    def _update_performance_metrics(self, profit: float, duration_seconds: float = 0.0):
+        """
+        Update detailed performance metrics when a trade closes.
+        
+        ENHANCEMENT 7: Comprehensive performance tracking
+        
+        Args:
+            profit: Profit/loss from the trade
+            duration_seconds: How long the trade was open
+        """
+        try:
+            # Update basic counters
+            self.session_stats["trades_closed"] += 1
+            self.session_stats["total_profit"] += profit
+            
+            # Categorize trade outcome
+            if profit > 0.01:  # Win (threshold to avoid rounding errors)
+                self.session_stats["wins"] += 1
+                self.session_stats["consecutive_wins"] += 1
+                self.session_stats["consecutive_losses"] = 0
+                
+                # Track largest win
+                if profit > self.session_stats["largest_win"]:
+                    self.session_stats["largest_win"] = profit
+                
+                # Update max consecutive wins
+                if self.session_stats["consecutive_wins"] > self.session_stats["max_consecutive_wins"]:
+                    self.session_stats["max_consecutive_wins"] = self.session_stats["consecutive_wins"]
+                    
+            elif profit < -0.01:  # Loss
+                self.session_stats["losses"] += 1
+                self.session_stats["consecutive_losses"] += 1
+                self.session_stats["consecutive_wins"] = 0
+                
+                # Track largest loss
+                if profit < self.session_stats["largest_loss"]:
+                    self.session_stats["largest_loss"] = profit
+                
+                # Update max consecutive losses
+                if self.session_stats["consecutive_losses"] > self.session_stats["max_consecutive_losses"]:
+                    self.session_stats["max_consecutive_losses"] = self.session_stats["consecutive_losses"]
+                    
+            else:  # Breakeven
+                self.session_stats["breakeven"] += 1
+                self.session_stats["consecutive_wins"] = 0
+                self.session_stats["consecutive_losses"] = 0
+            
+            # Calculate win rate
+            total_trades = self.session_stats["wins"] + self.session_stats["losses"] + self.session_stats["breakeven"]
+            if total_trades > 0:
+                self.session_stats["win_rate"] = self.session_stats["wins"] / total_trades
+            
+            # Calculate average win/loss
+            if self.session_stats["wins"] > 0:
+                # Calculate from all profitable trades
+                wins_total = sum([p for p in self.session_stats.get("returns", []) if p > 0.01])
+                self.session_stats["avg_win"] = wins_total / self.session_stats["wins"] if wins_total else 0.0
+            
+            if self.session_stats["losses"] > 0:
+                # Calculate from all losing trades
+                losses_total = abs(sum([p for p in self.session_stats.get("returns", []) if p < -0.01]))
+                self.session_stats["avg_loss"] = losses_total / self.session_stats["losses"] if losses_total else 0.0
+            
+            # Calculate profit factor
+            gross_profit = sum([p for p in self.session_stats.get("returns", []) if p > 0])
+            gross_loss = abs(sum([p for p in self.session_stats.get("returns", []) if p < 0]))
+            
+            if gross_loss > 0:
+                self.session_stats["profit_factor"] = gross_profit / gross_loss
+            else:
+                self.session_stats["profit_factor"] = 999.0 if gross_profit > 0 else 0.0
+            
+            # Track returns for Sharpe ratio
+            self.session_stats["returns"].append(profit)
+            
+            # Calculate Sharpe ratio (simplified: returns / std dev of returns)
+            if len(self.session_stats["returns"]) >= 10:
+                import numpy as np
+                returns_array = np.array(self.session_stats["returns"])
+                mean_return = np.mean(returns_array)
+                std_return = np.std(returns_array)
+                
+                if std_return > 0:
+                    # Annualized Sharpe (assuming ~250 trading days, ~50 trades/day)
+                    self.session_stats["sharpe_ratio"] = (mean_return / std_return) * np.sqrt(250 * 50)
+                else:
+                    self.session_stats["sharpe_ratio"] = 0.0
+            
+            # Track trade duration
+            if duration_seconds > 0:
+                self.session_stats["trade_durations"].append(duration_seconds)
+                
+                # Calculate duration stats
+                durations = self.session_stats["trade_durations"]
+                self.session_stats["avg_trade_duration_seconds"] = sum(durations) / len(durations)
+                self.session_stats["min_trade_duration"] = min(durations)
+                self.session_stats["max_trade_duration"] = max(durations)
+            
+            # Track hourly P&L
+            current_hour = time.strftime("%H:00")
+            if current_hour not in self.session_stats["hourly_pnl"]:
+                self.session_stats["hourly_pnl"][current_hour] = 0.0
+            self.session_stats["hourly_pnl"][current_hour] += profit
+            
+            # Log summary every 10 trades
+            if self.session_stats["trades_closed"] % 10 == 0:
+                logger.info(
+                    f"[PERFORMANCE] Trades: {self.session_stats['trades_closed']} | "
+                    f"WinRate: {self.session_stats['win_rate']:.1%} | "
+                    f"PF: {self.session_stats['profit_factor']:.2f} | "
+                    f"Sharpe: {self.session_stats['sharpe_ratio']:.2f}"
+                )
+                
+        except Exception as e:
+            logger.warning(f"[PERFORMANCE] Error updating metrics: {e}")
+
 
     async def initialize_database(self) -> None:
         """Initialize async database components."""
