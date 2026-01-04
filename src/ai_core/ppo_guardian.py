@@ -101,6 +101,12 @@ class PPOGuardian:
         self.env = AetherTradingEnv()
         self.memory_file = "data/brain_memory.json"
         
+        # ENHANCEMENT 3: Auto-Training Configuration
+        self.auto_train_interval = 100  # Train every 100 trades
+        self.trades_since_training = 0
+        self.min_experiences_for_training = 50  # Minimum experiences needed
+        self.last_training_time = 0.0
+        
         # Ensure data and models directories exist
         os.makedirs("data", exist_ok=True)
         os.makedirs(os.path.dirname(model_path), exist_ok=True)
@@ -127,6 +133,7 @@ class PPOGuardian:
             logger.info(f"Fresh Brain Saved to {model_path}")
             
         logger.info("PPO Guardian Online: Level 5 Self-Learning Active.")
+        logger.info(f"[AUTO-TRAIN] Enabled: Will retrain every {self.auto_train_interval} trades")
 
     def get_dynamic_zone(self, drawdown_pips, atr, trend_strength, nexus_prediction=0.0):
         """
@@ -202,6 +209,8 @@ class PPOGuardian:
     def remember(self, obs, action, reward):
         """
         Stores the experience in the short-term memory.
+        
+        ENHANCEMENT 3: Auto-triggers training every N trades
         """
         # Ensure obs is a list of exactly 4 elements
         if isinstance(obs, np.ndarray):
@@ -236,6 +245,30 @@ class PPOGuardian:
             json.dump(memory, f)
             
         logger.info(f"Brain Memory Updated. Total Experiences: {len(memory)}")
+        
+        # ENHANCEMENT 3: Auto-Training Trigger
+        self.trades_since_training += 1
+        
+        # Check if we should auto-train
+        if (self.trades_since_training >= self.auto_train_interval and 
+            len(memory) >= self.min_experiences_for_training):
+            
+            logger.info(f"[AUTO-TRAIN] Triggering automatic training ({self.trades_since_training} trades since last training)")
+            
+            # Trigger evolution
+            success = self.evolve()
+            
+            if success:
+                self.trades_since_training = 0
+                self.last_training_time = time.time()
+                logger.info(f"[AUTO-TRAIN] Training completed successfully. Counter reset.")
+            else:
+                logger.warning(f"[AUTO-TRAIN] Training failed. Will retry at next interval.")
+        else:
+            # Log progress towards next training
+            trades_remaining = self.auto_train_interval - self.trades_since_training
+            if self.trades_since_training % 10 == 0:  # Log every 10 trades
+                logger.debug(f"[AUTO-TRAIN] Progress: {self.trades_since_training}/{self.auto_train_interval} trades ({trades_remaining} until next training)")
 
     def evolve(self):
         """
