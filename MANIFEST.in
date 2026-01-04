@@ -1,6 +1,0 @@
-include README.md
-include requirements.txt
-include VERSION.txt
-recursive-include config *.json *.yaml *.env
-recursive-include data *.json
-recursive-include models *.pth
