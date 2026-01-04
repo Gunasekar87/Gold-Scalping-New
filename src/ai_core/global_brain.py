@@ -48,21 +48,33 @@ class GlobalBrain:
             usd_proxy = None
             risk_proxy = None
 
+        # ENHANCEMENT 6: Expanded Correlation Matrix
         # Correlation signs relative to Gold (XAUUSD)
-        # - USD strength up => Gold down
-        # - Risk-on up => Gold down
+        # - USD strength up => Gold down (inverse)
+        # - Risk-on up => Gold down (inverse)
+        # - VIX up => Gold up (positive - fear drives gold)
+        # - US10Y up => Gold down (inverse - yields compete with gold)
         self.correlations = {}
         if usd_proxy:
-            self.correlations[usd_proxy] = -0.85
+            self.correlations[usd_proxy] = -0.85  # Strong inverse
         if risk_proxy:
-            self.correlations[risk_proxy] = -0.40
+            self.correlations[risk_proxy] = -0.40  # Moderate inverse
+        
+        # ENHANCEMENT 6: Add VIX and US10Y
+        self.correlations['VIX'] = 0.60   # Positive - fear index
+        self.correlations['US10Y'] = -0.50  # Inverse - yield competition
 
+        # ENHANCEMENT 6: Expanded Thresholds
         # Thresholds for "Significant Move" (percent change in last 1 min)
         self.thresholds = {}
         if usd_proxy:
-            self.thresholds[usd_proxy] = 0.02
+            self.thresholds[usd_proxy] = 0.02  # 2% move in USD
         if risk_proxy:
-            self.thresholds[risk_proxy] = 0.05
+            self.thresholds[risk_proxy] = 0.05  # 5% move in equities
+        
+        # ENHANCEMENT 6: Add VIX and US10Y thresholds
+        self.thresholds['VIX'] = 0.10  # 10% move in VIX (volatile)
+        self.thresholds['US10Y'] = 0.01  # 1% move in yields
 
         # Cache last computed signal to avoid overloading terminal on every tick
         self._cache_interval_s = 1.0
@@ -70,6 +82,8 @@ class GlobalBrain:
         self._last_fetch_ts = 0.0
         self.last_prices = {}
         self.last_update = 0
+        
+        logger.info(f"[GLOBAL BRAIN] Initialized with {len(self.correlations)} correlation pairs")
         
     def update_reference_prices(self, prices: Dict[str, float]):
         """Update the baseline prices for calculation."""
