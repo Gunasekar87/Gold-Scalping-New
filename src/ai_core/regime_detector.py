@@ -352,3 +352,142 @@ class RegimeDetector:
         }
         
         return params.get(regime, {'stop_multiplier': 1.0, 'size_multiplier': 1.0})
+    
+    # ============================================================================
+    # ENHANCEMENT 5: Strategy Parameters Integration
+    # Added: January 4, 2026
+    # Purpose: Provide regime-specific trading parameters for engine integration
+    # ============================================================================
+    
+    def get_strategy_params(self) -> Dict[str, float]:
+        """
+        Get strategy parameters optimized for current regime.
+        
+        ENHANCEMENT 5: Direct integration with trading engine
+        
+        Returns:
+            Dict with:
+            - entry_threshold: Minimum confidence for trade entry (0.5-0.8)
+            - tp_mult: Take profit multiplier (0.5-2.0)
+            - position_size_mult: Position size adjustment (0.7-1.5)
+            - stop_mult: Stop loss multiplier (0.8-2.0)
+        """
+        if not self._regime_history:
+            return {
+                'entry_threshold': 0.65,
+                'tp_mult': 1.0,
+                'position_size_mult': 1.0,
+                'stop_mult': 1.0
+            }
+        
+        current = self._regime_history[-1]
+        regime = current['regime']
+        confidence = current['confidence']
+        
+        # Regime-specific parameters
+        strategy_params = {
+            MarketRegime.TRENDING_UP: {
+                'entry_threshold': 0.60,  # Lower threshold - trend is your friend
+                'tp_mult': 1.5,  # Larger targets in trends
+                'position_size_mult': 1.2,  # Larger positions
+                'stop_mult': 1.5  # Wider stops
+            },
+            MarketRegime.TRENDING_DOWN: {
+                'entry_threshold': 0.60,
+                'tp_mult': 1.5,
+                'position_size_mult': 1.2,
+                'stop_mult': 1.5
+            },
+            MarketRegime.RANGING: {
+                'entry_threshold': 0.75,  # Higher threshold - be selective
+                'tp_mult': 0.8,  # Smaller targets in ranges
+                'position_size_mult': 0.9,  # Smaller positions
+                'stop_mult': 0.8  # Tighter stops
+            },
+            MarketRegime.VOLATILE: {
+                'entry_threshold': 0.80,  # Very selective in volatility
+                'tp_mult': 1.0,  # Normal targets
+                'position_size_mult': 0.7,  # Much smaller positions
+                'stop_mult': 2.0  # Much wider stops
+            },
+            MarketRegime.QUIET: {
+                'entry_threshold': 0.65,  # Normal threshold
+                'tp_mult': 1.0,  # Normal targets
+                'position_size_mult': 1.0,  # Normal size
+                'stop_mult': 1.0  # Normal stops
+            },
+            MarketRegime.BREAKOUT: {
+                'entry_threshold': 0.55,  # Lower threshold - catch breakouts
+                'tp_mult': 1.8,  # Large targets on breakouts
+                'position_size_mult': 1.1,  # Slightly larger positions
+                'stop_mult': 1.3  # Wider stops for volatility
+            }
+        }
+        
+        params = strategy_params.get(regime, {
+            'entry_threshold': 0.65,
+            'tp_mult': 1.0,
+            'position_size_mult': 1.0,
+            'stop_mult': 1.0
+        })
+        
+        # Adjust based on confidence
+        # If low confidence in regime detection, be more conservative
+        if confidence < 0.6:
+            params['entry_threshold'] = min(0.80, params['entry_threshold'] + 0.10)
+            params['position_size_mult'] *= 0.9
+        
+        return params
+    
+    def get_current_regime(self) -> Optional[MarketRegime]:
+        """
+        Get the current detected regime.
+        
+        Returns:
+            Current MarketRegime or None if no detection yet
+        """
+        if not self._regime_history:
+            return None
+        return self._regime_history[-1]['regime']
+    
+    def get_regime_confidence(self) -> float:
+        """
+        Get confidence in current regime detection.
+        
+        Returns:
+            Confidence score (0.0-1.0)
+        """
+        if not self._regime_history:
+            return 0.0
+        return self._regime_history[-1]['confidence']
+    
+    def should_trade_in_regime(self, signal_confidence: float) -> tuple:
+        """
+        Determine if trading should proceed based on regime and signal confidence.
+        
+        Args:
+            signal_confidence: AI signal confidence (0.0-1.0)
+            
+        Returns:
+            (should_trade, reason)
+        """
+        if not self._regime_history:
+            return True, "No regime data - proceed normally"
+        
+        regime = self._regime_history[-1]['regime']
+        regime_confidence = self._regime_history[-1]['confidence']
+        
+        # Get regime-specific threshold
+        params = self.get_strategy_params()
+        threshold = params['entry_threshold']
+        
+        # Check if signal meets regime-adjusted threshold
+        if signal_confidence < threshold:
+            return False, f"Signal confidence {signal_confidence:.2f} below {regime.value} threshold {threshold:.2f}"
+        
+        # Additional checks for specific regimes
+        if regime == MarketRegime.VOLATILE and regime_confidence > 0.8:
+            if signal_confidence < 0.85:
+                return False, "High volatility regime - require very high confidence"
+        
+        return True, f"Signal approved for {regime.value} regime"
