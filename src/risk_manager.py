@@ -394,9 +394,9 @@ class RiskManager:
                 candle_close_age = float('inf')
 
             try:
-                max_tick_age = float(os.getenv("AETHER_FRESH_TICK_MAX_AGE_S", os.getenv("AETHER_STRICT_TICK_MAX_AGE_S", "2.5")))
+                max_tick_age = float(os.getenv("AETHER_FRESH_TICK_MAX_AGE_S", os.getenv("AETHER_STRICT_TICK_MAX_AGE_S", "5.0")))  # Increased from 2.5s to 5.0s
             except Exception:
-                max_tick_age = 2.5
+                max_tick_age = 5.0  # Increased from 2.5
 
             try:
                 max_candle_age = float(os.getenv("AETHER_FRESH_CANDLE_CLOSE_MAX_AGE_S", "0"))
