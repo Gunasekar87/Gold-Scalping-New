@@ -407,9 +407,9 @@ class RiskManager:
                 candle_close_age = float('inf')
 
             try:
-                max_tick_age = float(os.getenv("AETHER_FRESH_TICK_MAX_AGE_S", os.getenv("AETHER_STRICT_TICK_MAX_AGE_S", "5.0")))  # Increased from 2.5s to 5.0s
+                max_tick_age = float(os.getenv("AETHER_FRESH_TICK_MAX_AGE_S", os.getenv("AETHER_STRICT_TICK_MAX_AGE_S", "10.0")))  # Increased from 5.0s to 10.0s
             except Exception:
-                max_tick_age = 5.0  # Increased from 2.5
+                max_tick_age = 10.0  # Increased from 5.0
 
             try:
                 max_candle_age = float(os.getenv("AETHER_FRESH_CANDLE_CLOSE_MAX_AGE_S", "0"))
@@ -533,7 +533,7 @@ class RiskManager:
                     state.high_vol_mode = False
 
                 if state.high_vol_mode:
-                    raw_scale = min(1.0 + (max(volatility_ratio, 2.0) - 2.0) * 0.5, 3.0)
+                    raw_scale = min(1.0 + (max(volatility_ratio, 2.0) - 2.0) * 0.5, 2.0)  # Reduced cap from 3.0x to 2.0x
                     raw_scale = max(1.0, raw_scale)
                     raw_scale = round(raw_scale / VOL_SCALE_STEP) * VOL_SCALE_STEP
 
