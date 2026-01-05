@@ -331,9 +331,9 @@ class TradingEngine:
                 self._time_offset = raw_diff
                 self._last_offset_calc = now
                 if old_offset is None:
-                    logger.warning(f"[FRESHNESS] Detected Timezone Offset: {self._time_offset:.2f}s. Adjusting...")
+                    logger.debug(f"[FRESHNESS] Detected Timezone Offset: {self._time_offset:.2f}s. Adjusting...")
                 elif abs(old_offset - self._time_offset) > 60:  # Log if drift > 1 minute
-                    logger.info(f"[FRESHNESS] Updated Timezone Offset: {old_offset:.2f}s → {self._time_offset:.2f}s")
+                    logger.warning(f"[FRESHNESS] Updated Timezone Offset: {old_offset:.2f}s → {self._time_offset:.2f}s")
             else:
                 self._time_offset = 0.0
                 self._last_offset_calc = now

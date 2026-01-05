@@ -702,8 +702,10 @@ class MT5Adapter(BrokerAdapter):
                     break
         
         if not target_pos:
-            logger.warning(f"Cannot close position {ticket}: Not found in broker")
-            return False
+            logger.info(f"[CLOSE] Position {ticket} not found in broker (already closed)")
+            # Position already closed - return True to indicate successful state
+            # This prevents error spam when positions are closed externally (SL/TP hit, manual close, etc.)
+            return True
             
         # If volume is specified, we need to create a copy of the position data with the new volume
         if volume:

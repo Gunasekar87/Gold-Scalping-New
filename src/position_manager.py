@@ -530,7 +530,7 @@ class PositionManager:
                     raw_diff = now - tick_ts
                     if abs(raw_diff) > 600:
                         self._time_offset = raw_diff
-                        logger.warning(f"[FRESHNESS] Detected Timezone Offset: {self._time_offset:.2f}s. Adjusting...")
+                        logger.debug(f"[FRESHNESS] Detected Timezone Offset: {self._time_offset:.2f}s. Adjusting...")
                     else:
                         self._time_offset = 0.0
 
@@ -689,7 +689,7 @@ class PositionManager:
                 raw_diff = now - tick_ts
                 if abs(raw_diff) > 600:
                     self._time_offset = raw_diff
-                    logger.warning(f"[FRESHNESS] Detected Timezone Offset: {self._time_offset:.2f}s. Adjusting...")
+                    logger.debug(f"[FRESHNESS] Detected Timezone Offset: {self._time_offset:.2f}s. Adjusting...")
                 else:
                     self._time_offset = 0.0
             
