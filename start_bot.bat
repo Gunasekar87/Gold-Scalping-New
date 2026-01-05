@@ -6,6 +6,7 @@ REM Updated: January 5, 2026
 REM
 REM This script:
 REM - Works from any directory (VPS-ready)
+REM - Handles UNC paths (RDP shared drives)
 REM - Auto-detects script location
 REM - Validates environment
 REM - Loads all configurations
@@ -14,12 +15,46 @@ REM ============================================================================
 
 setlocal enabledelayedexpansion
 
+REM ============================================================================
+REM FIX: Handle UNC Paths (RDP Shared Drives)
+REM ============================================================================
+
 REM Get the directory where this script is located
 set "SCRIPT_DIR=%~dp0"
 set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 
+REM Check if path is UNC (starts with \\)
+echo %SCRIPT_DIR% | findstr /B "\\\\" >nul
+if %errorlevel%==0 (
+    echo ============================================================================
+    echo    WARNING: UNC Path Detected
+    echo ============================================================================
+    echo.
+    echo Current path: %SCRIPT_DIR%
+    echo.
+    echo UNC paths (network/RDP shared drives) are not supported by CMD.
+    echo.
+    echo SOLUTION: Copy the entire folder to a local drive on the VPS
+    echo.
+    echo Example:
+    echo   1. Copy folder to: C:\Scalping_Gold
+    echo   2. Run start_bot.bat from there
+    echo.
+    echo Or use this command to copy:
+    echo   xcopy "%SCRIPT_DIR%" "C:\Scalping_Gold\" /E /I /Y
+    echo.
+    pause
+    exit /b 1
+)
+
 REM Change to script directory
 cd /d "%SCRIPT_DIR%"
+if errorlevel 1 (
+    echo [ERROR] Failed to change to script directory: %SCRIPT_DIR%
+    echo [ERROR] Please ensure the path is valid and accessible
+    pause
+    exit /b 1
+)
 
 echo ============================================================================
 echo    AETHER Trading Bot v5.6.5
