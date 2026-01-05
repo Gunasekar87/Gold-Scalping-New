@@ -2179,14 +2179,13 @@ class TradingEngine:
                         print(f"[AI THINKING] Regime: {regime.name} | Worker: {worker_name} | Action: HOLD | Reason: {reason}", flush=True)
                 return
             
-            # [AI ENTRY PLAN] Log Detailed Analysis
-            print(f"\n>>> [AI ENTRY SIGNAL] <<<", flush=True)
-            print(f"Signal:       {signal.action.value} (Conf: {signal.confidence:.2f})", flush=True)
-            print(f"Reason:       {signal.reason}", flush=True)
-            print(f"Regime:       {market_regime.name}", flush=True)
-            print(f"Oracle:       {oracle_prediction} ({oracle_confidence:.2f})", flush=True)
-            print(f"Pressure:     {pressure_metrics.get('dominance', 'NEUTRAL')} ({pressure_metrics.get('intensity', 'LOW')})", flush=True)
-            print(f"----------------------------------------------------", flush=True)
+            # Show AI decision on dashboard (event-driven, no spam)
+            dashboard = get_dashboard()
+            dashboard.ai_decision(
+                prediction=signal.action.value,
+                confidence=signal.confidence,
+                reason=signal.reason
+            )
 
             # --- CHAMELEON FILTER (SOFT PENALTY) ---
             # Instead of blocking, reduce lot size for Counter-Trend trades

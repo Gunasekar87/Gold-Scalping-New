@@ -20,60 +20,18 @@ class TradingLogger:
     @staticmethod
     def log_initial_trade(bucket_id: str, data: Dict):
         """
-        Log comprehensive trading plan when opening initial trade
-        Robust version that handles new AI fields and prevents crashes.
+        Log trade entry using trader dashboard (event-driven, no spam)
         """
-        def _f(x, d=0.0):
-            try:
-                return float(x)
-            except Exception:
-                return float(d)
-
-        # Format the output exactly as requested
-        msg = []
-        msg.append("TRADE ENTRY SUMMARY")
-        msg.append("-" * 45)
-        msg.append(f"Symbol: {data.get('symbol', 'UNKNOWN')}")
-        msg.append(f"Action: {data.get('action', 'UNKNOWN')}")
+        from .trader_dashboard import get_dashboard
         
-        entry_price = data.get('entry_price')
-        if entry_price is not None:
-            msg.append(f"Entry Price: {_f(entry_price):.5f}")
-            
-        lots = data.get('lots')
-        if lots is not None:
-            msg.append(f"Position Size: {_f(lots):.2f} lots")
-        
-        # Handle dynamic/string TP values safely
-        tp_price = data.get('tp_price')
-        tp_pips = data.get('tp_pips')
-        tp_str = f"{tp_price:.5f}" if isinstance(tp_price, (int, float)) else str(tp_price)
-        pips_str = f"{tp_pips:.1f}" if isinstance(tp_pips, (int, float)) else str(tp_pips)
-        msg.append(f"Target: {tp_str} (+{pips_str} pips)")
-        
-        # New AI Fields
-        conf = data.get('confidence')
-        if conf is not None:
-            msg.append(f"AI Confidence: {_f(conf):.2f}")
-            
-        reasons = data.get('reasons')
-        if reasons:
-            if isinstance(reasons, (list, tuple)):
-                msg.append("Policy Reasons: " + " | ".join(map(str, reasons)))
-            else:
-                msg.append("Policy Reasons: " + str(reasons))
-
-        # Display hedge levels (projected)
-        if 'hedges' in data and data['hedges']:
-            msg.append("Hedge Plan:")
-            for i, hedge in enumerate(data['hedges'], 1):
-                msg.append(f"  Hedge {i}: {hedge['direction']} {hedge['lots']} lots @ {hedge['trigger_price']}")
-        
-        if 'reasoning' in data:
-            msg.append(f"AI Analysis: {data['reasoning']}")
-        
-        logger.info("\n".join(msg))
-        print("\n".join(msg), flush=True)
+        dashboard = get_dashboard()
+        dashboard.trade_entry(
+            action=data.get('action', 'UNKNOWN'),
+            lots=float(data.get('lots', 0)),
+            price=float(data.get('entry_price', 0)),
+            reason=data.get('reasoning', data.get('reasons', 'N/A')),
+            trade_type="ENTRY"
+        )
 
     @staticmethod
     def log_active_status(symbol: str, bucket_id: str, positions: List[Dict], pnl_pips: float, tp_pips: float, next_hedge: Optional[Dict] = None, ai_notes: str = ""):
@@ -106,28 +64,22 @@ class TradingLogger:
     @staticmethod
     def log_trade_close(symbol: str, exit_reason: str, duration: float, pnl_usd: float, pnl_pips: float, positions_closed: int, ai_analysis: Dict):
         """
-        Log trade exit with detailed performance summary
+        Log trade exit using trader dashboard (event-driven, no spam)
         """
+        from .trader_dashboard import get_dashboard
+        
         # Format duration
         m, s = divmod(duration, 60)
         h, m = divmod(m, 60)
-        duration_str = f"{int(h)}h {int(m)}m {int(s)}s" if h > 0 else f"{int(m)}m {int(s)}s"
+        duration_str = f"{int(h)}h {int(m)}m" if h > 0 else f"{int(m)}m {int(s)}s"
         
-        # Construct explanation if not provided
-        explanation = ai_analysis.get('explanation', 'N/A')
-        
-        msg = []
-        msg.append("TRADE EXIT SUMMARY")
-        msg.append("-" * 45)
-        msg.append(f"Symbol: {symbol}")
-        msg.append(f"Exit Reason: {exit_reason}")
-        msg.append(f"Duration: {duration_str}")
-        msg.append(f"Total PnL: ${pnl_usd:.2f} ({'+' if pnl_pips >= 0 else ''}{pnl_pips:.1f} pips)")
-        msg.append(f"Positions Closed: {positions_closed}")
-        msg.append(f"Explanation: {explanation}")
-        
-        logger.info("\n".join(msg))
-        print("\n".join(msg), flush=True)
+        dashboard = get_dashboard()
+        dashboard.trade_exit(
+            num_positions=positions_closed,
+            profit=pnl_usd,
+            duration_str=duration_str,
+            reason=exit_reason
+        )
     
     @staticmethod
     def log_decision_change(symbol: str, old_decision: Dict, new_decision: Dict, reason: str):
