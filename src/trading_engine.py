@@ -169,7 +169,7 @@ class TradingEngine:
             "on",
         )
         self._fresh_tick_max_age_s = float(
-            os.getenv("AETHER_FRESH_TICK_MAX_AGE_S", "2.5")
+            os.getenv("AETHER_FRESH_TICK_MAX_AGE_S", "5.0")  # Increased from 2.5s to accommodate MT5 latency
         )
         # 0/negative = auto based on timeframe (2x TF + 10s)
         self._fresh_candle_close_max_age_s = float(os.getenv("AETHER_FRESH_CANDLE_CLOSE_MAX_AGE_S", "0"))
