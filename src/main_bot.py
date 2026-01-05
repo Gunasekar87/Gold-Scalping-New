@@ -63,6 +63,26 @@ if not ui_logger.handlers:
     ui_logger.addHandler(console_handler)
     ui_logger.propagate = False
 
+# Configure Trader Dashboard (Event-Driven Logging)
+trader_logger = logging.getLogger("TRADER")
+trader_logger.setLevel(logging.INFO)
+if not trader_logger.handlers:
+    trader_handler = logging.StreamHandler()
+    trader_handler.setFormatter(logging.Formatter('%(message)s'))
+    trader_logger.addHandler(trader_handler)
+    trader_logger.propagate = False
+
+# Suppress technical/internal logs to reduce noise
+# Only show warnings and errors from these loggers
+logging.getLogger("FRESHNESS").setLevel(logging.WARNING)
+logging.getLogger("POS_MGMT").setLevel(logging.WARNING)
+logging.getLogger("BUCKET").setLevel(logging.WARNING)
+logging.getLogger("TP_CHECK").setLevel(logging.WARNING)
+logging.getLogger("ZONE_CHECK").setLevel(logging.WARNING)
+logging.getLogger("SYNC").setLevel(logging.WARNING)
+logging.getLogger("PLAN").setLevel(logging.WARNING)
+logging.getLogger("CLOSE").setLevel(logging.WARNING)
+
 
 class AetherBot:
     """

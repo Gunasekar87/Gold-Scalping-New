@@ -33,6 +33,7 @@ from .utils.trading_logger import TradingLogger, DecisionTracker, format_pips
 from .utils.news_filter import NewsFilter
 from .utils.news_calendar import NewsCalendar
 from .ai_core.tick_pressure import TickPressureAnalyzer
+from .utils.trader_dashboard import get_dashboard
 
 # [AI INTELLIGENCE] New Policy & Governance Modules
 from src.config.settings import FLAGS, POLICY as _PTUNE, RISK as _RLIM
