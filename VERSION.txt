@@ -1,4 +1,18 @@
-﻿v5.5.6 (GHOST PROTOCOL FIX) - 2025-12-22
+﻿v5.5.8 (VELOCITY VETO) - 2025-12-24
+----------------------------------------------------------------
+[NEW] Velocity Veto: Oracle now strictly blocks entries that oppose micro-velocity.
+      - Prevents "Catching the Knife" (Buying when price is crashing).
+      - Prevents "Selling the Spike" (Selling when price is rocketing).
+      - Uses Tick Velocity threshold (+/- 0.5) as a hard physics check.
+
+v5.5.7 (GHOST PROTOCOL SAFETY) - 2025-12-23
+----------------------------------------------------------------
+[FIX] Ghost Protocol Safety: Explicitly aborts "Zombie Cleanup" if the bucket PnL is negative.
+      - Prevents the bot from realizing losses just to clean up database mismatches.
+      - Forces adoption of "Ghost" trades into active recovery if they are losing.
+[FIX] PositionManager: Added explicit negative PnL check before close execution.
+
+v5.5.6 (GHOST PROTOCOL FIX) - 2025-12-22
 ----------------------------------------------------------------
 [FIX] Added explicit AETHER_TIME_OFFSET_SECS override and unified 5.0s freshness gate for recovery/hedge to eliminate timezone blocks.
 

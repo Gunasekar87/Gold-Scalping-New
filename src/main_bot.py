@@ -12,7 +12,7 @@ The bot orchestrates:
 
 Author: AETHER Development Team
 License: MIT
-Version: 5.5.3
+Version: 5.5.8
 """
 
 import asyncio
@@ -378,14 +378,9 @@ class AetherBot:
             
             # Safe Garbage Collection
             # Only clean memory if we are FLAT (no open trades) to avoid lag spikes during trading
-            if self.position_manager.get_total_positions() == 0:
-                import gc
-                gc.collect()
-            else:
-                # [OPTIMIZATION] Manual GC during sleep to prevent "Stop-the-World" pauses
-                # Run Generation 0 collection (fastest) even when trades are open
-                import gc
-                gc.collect(0)
+            # [OPTIMIZATION] Removed frequent GC calls. Python's cyclic GC is sufficient.
+            # Only force collect if necessary during idle times (implemented elsewhere if needed).
+            pass
 
             logger.debug("[SUCCESS] TRADING CYCLE COMPLETED")
 

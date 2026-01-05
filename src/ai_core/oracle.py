@@ -267,6 +267,25 @@ class Oracle:
         else:
             reason = f"Weak Signal (Conf: {final_confidence:.2f} < {vel_threshold:.2f})"
 
+        # ----------------------------------------------------------------
+        # [NEW] VELOCITY VETO (The Physics Check)
+        # ----------------------------------------------------------------
+        # If we want to BUY, the immediate micro-velocity cannot be crashing.
+        # If we want to SELL, the immediate micro-velocity cannot be spiking.
+        
+        current_velocity = 0.0
+        if self.tick_pressure:
+             metrics = self.tick_pressure.get_pressure_metrics()
+             current_velocity = float(metrics.get('velocity', 0.0) or 0.0)
+
+        if signal == 1 and current_velocity < -0.5:
+             logger.info(f"🚫 [VELOCITY VETO] Blocked BUY. Price is crashing (Vel={current_velocity:.2f}). Waiting for stabilization.")
+             return {'signal': 0, 'confidence': 0.0, 'reason': 'VELOCITY_VETO_CRASH'}
+
+        if signal == -1 and current_velocity > 0.5:
+             logger.info(f"🚫 [VELOCITY VETO] Blocked SELL. Price is spiking (Vel={current_velocity:.2f}). Waiting for stabilization.")
+             return {'signal': 0, 'confidence': 0.0, 'reason': 'VELOCITY_VETO_SPIKE'}
+
         # 6. Spatial Veto (Architect) - The final safety check
         if signal != 0 and self.architect:
             structure = self.architect.get_market_structure(symbol)
