@@ -258,6 +258,22 @@ class TradingEngine:
 
         logger.info(f"TradingEngine initialized for {config.symbol}")
         logger.info("[ENHANCEMENT 7] Advanced performance tracking enabled")
+        
+        # INTEGRATION FIX: Initialize Model Monitor (Enhancement #8)
+        try:
+            from .utils.model_monitor import ModelMonitor
+            self.model_monitor = ModelMonitor()
+            logger.info("[ENHANCEMENT 8] Model monitoring initialized")
+        except Exception as e:
+            logger.warning(f"Model monitor not available: {e}")
+            self.model_monitor = None
+        
+        # INTEGRATION FIX: Setup callbacks for position_manager
+        if hasattr(self.position_manager, 'callbacks'):
+            self.position_manager.callbacks['on_trade_close'] = self._update_performance_metrics
+            if self.model_monitor:
+                self.position_manager.callbacks['on_prediction_outcome'] = self._record_prediction_outcome
+            logger.info("[INTEGRATION] Position manager callbacks configured")
 
     def _log_entry_gate(self, reason: str) -> None:
         """Throttled log for strict entry gating (avoids spam)."""
@@ -595,6 +611,51 @@ class TradingEngine:
                 
         except Exception as e:
             logger.warning(f"[PERFORMANCE] Error updating metrics: {e}")
+    
+    # ============================================================================
+    # INTEGRATION FIX: Model Monitor Integration
+    # Added: January 4, 2026
+    # Purpose: Record prediction outcomes for AI accuracy tracking
+    # ============================================================================
+    
+    def _record_prediction_outcome(self, timestamp: float, actual_direction: str, profit: float):
+        """
+        Record actual trade outcome for model monitoring.
+        
+        INTEGRATION FIX: Connects Enhancement #8 with position manager
+        
+        Args:
+            timestamp: Timestamp when prediction was made
+            actual_direction: Actual outcome ('UP', 'DOWN', 'NEUTRAL')
+            profit: Actual profit/loss
+        """
+        if not self.model_monitor:
+            return
+        
+        try:
+            self.model_monitor.record_outcome(
+                timestamp=timestamp,
+                actual_direction=actual_direction,
+                profit=profit
+            )
+            
+            # Log accuracy summary every 50 trades
+            matched_count = sum(1 for p in self.model_monitor.predictions if p['actual'] is not None)
+            if matched_count > 0 and matched_count % 50 == 0:
+                accuracy = self.model_monitor.get_accuracy()
+                should_retrain, reason = self.model_monitor.should_retrain()
+                
+                logger.info(
+                    f"[MODEL MONITOR] Accuracy: {accuracy:.2%} | "
+                    f"Predictions: {matched_count} | "
+                    f"Status: {reason}"
+                )
+                
+                if should_retrain:
+                    logger.warning(f"[MODEL MONITOR] ALERT: {reason}")
+                    
+        except Exception as e:
+            logger.warning(f"[MODEL MONITOR] Error recording outcome: {e}")
 
 
     async def initialize_database(self) -> None:

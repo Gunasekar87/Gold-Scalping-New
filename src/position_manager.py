@@ -136,11 +136,14 @@ class PositionManager:
     - State persistence for crash recovery
     """
 
-    def __init__(self, mt5_adapter=None, state_file: str = "data/position_state.json"):
+    def __init__(self, mt5_adapter=None, state_file: str = "data/position_state.json", callbacks: Dict[str, Callable] = None):
         self.state_file = state_file
         self._lock = RLock()  # Reentrant lock for thread safety
         self._position_locks: Dict[int, Lock] = {}  # Per-position locks for synchronous operations
         self._state_transition_lock = Lock()  # Protects state transitions
+        
+        # INTEGRATION FIX: Callbacks for trading_engine integration
+        self.callbacks = callbacks or {}
         
         # v5.5.0: Initialize Architect
         self.architect = Architect(mt5_adapter) if mt5_adapter else None
@@ -2763,6 +2766,28 @@ class PositionManager:
                 )
             except Exception as e:
                 logger.error(f"Failed to log trade close: {e}")
+        
+        # INTEGRATION FIX: Trigger performance metrics update (Enhancement #7)
+        if 'on_trade_close' in self.callbacks:
+            try:
+                self.callbacks['on_trade_close'](
+                    profit=total_pnl,
+                    duration_seconds=bucket_duration
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update performance metrics: {e}")
+        
+        # INTEGRATION FIX: Record outcome for model monitor (Enhancement #8)
+        if 'on_prediction_outcome' in self.callbacks:
+            try:
+                actual_direction = 'UP' if total_pnl > 0 else 'DOWN' if total_pnl < 0 else 'NEUTRAL'
+                self.callbacks['on_prediction_outcome'](
+                    timestamp=bucket_start_time,
+                    actual_direction=actual_direction,
+                    profit=total_pnl
+                )
+            except Exception as e:
+                logger.warning(f"Failed to record prediction outcome: {e}")
 
         return True
 

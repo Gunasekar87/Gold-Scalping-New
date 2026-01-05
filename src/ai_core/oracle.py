@@ -3,6 +3,7 @@ import torch.nn as nn
 import numpy as np
 import logging
 import os
+import time
 from typing import Optional
 from .nexus_transformer import TimeSeriesTransformer
 from .architect import Architect
@@ -22,7 +23,7 @@ class Oracle:
     The Oracle Engine: Uses Transformer models to predict future price movements.
     Wraps the institutional-grade TimeSeriesTransformer.
     """
-    def __init__(self, mt5_adapter=None, tick_analyzer=None, global_brain=None, model_path="models/nexus_transformer.pth"):
+    def __init__(self, mt5_adapter=None, tick_analyzer=None, global_brain=None, model_path="models/nexus_transformer.pth", model_monitor=None):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = None
         self.model_path = model_path
@@ -31,6 +32,9 @@ class Oracle:
         self.tick_pressure = tick_analyzer
         self.global_brain = global_brain
         self._market_book_symbols = set()
+        
+        # INTEGRATION FIX: Model monitor for prediction tracking
+        self.model_monitor = model_monitor
         
         # --- ADVANCED AI MODULES ---
         self.gnn = GNNPredictor()
@@ -469,6 +473,17 @@ class Oracle:
                     prediction = classes[predicted_idx]
                 else:
                     prediction = "NEUTRAL"
+                
+                # INTEGRATION FIX: Record prediction for model monitoring
+                if self.model_monitor:
+                    try:
+                        self.model_monitor.record_prediction(
+                            prediction=prediction,
+                            confidence=confidence,
+                            metadata={'timestamp': time.time()}
+                        )
+                    except Exception as e:
+                        logger.debug(f"Failed to record prediction: {e}")
                 
                 return prediction, confidence
 

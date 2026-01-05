@@ -231,6 +231,7 @@ class AetherBot:
             # Initialize Oracle (Layer 4)
             print(">>> [INIT] Loading Oracle (Price Prediction)...", flush=True)
             # v5.5.0: Pass broker and tick_analyzer to Oracle
+            # INTEGRATION FIX: Oracle will receive model_monitor from trading_engine after initialization
             self.oracle = Oracle(mt5_adapter=self.broker, tick_analyzer=self.tick_analyzer, global_brain=self.global_brain)
             print(">>> [INIT] Oracle Online.", flush=True)
 
@@ -239,6 +240,11 @@ class AetherBot:
                                               self.position_manager, self.risk_manager, db_manager, self.ppo_guardian, self.global_brain,
                                               tick_analyzer=self.tick_analyzer)
             print(">>> [INIT] Trading Engine Ready.", flush=True)
+            
+            # INTEGRATION FIX: Pass model_monitor to Oracle after trading_engine is initialized
+            if hasattr(self.trading_engine, 'model_monitor') and self.trading_engine.model_monitor:
+                self.oracle.model_monitor = self.trading_engine.model_monitor
+                logger.info("[INTEGRATION] Model monitor connected to Oracle")
 
             # Initialize database components
             print(">>> [INIT] Initializing Database...", flush=True)
