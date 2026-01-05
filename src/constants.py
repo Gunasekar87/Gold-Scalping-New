@@ -18,7 +18,7 @@ from enum import Enum, auto
 # ============================================================================
 
 SYSTEM_NAME: Final[str] = "A.E.T.H.E.R."
-SYSTEM_VERSION: Final[str] = "5.6.0"  # Updated: 9 Enhancements Complete (Jan 4, 2026)
+SYSTEM_VERSION: Final[str] = "5.6.1"  # Updated: Integration Fixes + Freshness Threshold (Jan 5, 2026)
 SYSTEM_FULL_NAME: Final[str] = "Adaptive Evolution Trading \u0026 Hedging Execution Robot"
 
 
