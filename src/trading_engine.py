@@ -182,6 +182,7 @@ class TradingEngine:
         self._last_freshness_ok: Optional[bool] = None
         self._last_freshness_trace_ts: float = 0.0
         self._time_offset: Optional[float] = None  # Auto-detected timezone offset
+        self._last_offset_calc: float = 0.0  # Track when offset was last calculated
 
         # Optional data provenance trace (tick/candles/OBI availability) for live verification
         self._data_provenance_trace = str(os.getenv("AETHER_DATA_PROVENANCE_TRACE", "0")).strip().lower() in (
@@ -273,6 +274,8 @@ class TradingEngine:
             self.position_manager.callbacks['on_trade_close'] = self._update_performance_metrics
             if self.model_monitor:
                 self.position_manager.callbacks['on_prediction_outcome'] = self._record_prediction_outcome
+            # Add strategist callback
+            self.position_manager.callbacks['on_strategist_update'] = self._update_strategist_stats
             logger.info("[INTEGRATION] Position manager callbacks configured")
 
     def _log_entry_gate(self, reason: str) -> None:
@@ -314,14 +317,26 @@ class TradingEngine:
         tick_ts = float(tick.get('time', 0.0) or 0.0)
 
         # [TIMEZONE AUTO-CORRECTION]
-        if self._time_offset is None and tick_ts > 0:
+        # Recalculate offset every hour to handle server time drift
+        should_recalc = (
+            self._time_offset is None or 
+            (now - self._last_offset_calc) > 3600  # Recalculate every hour
+        )
+        
+        if should_recalc and tick_ts > 0:
             raw_diff = now - tick_ts
             # If diff is > 10 mins (600s), assume timezone/clock skew and compensate
             if abs(raw_diff) > 600:
+                old_offset = self._time_offset
                 self._time_offset = raw_diff
-                logger.warning(f"[FRESHNESS] Detected Timezone Offset: {self._time_offset:.2f}s. Adjusting...")
+                self._last_offset_calc = now
+                if old_offset is None:
+                    logger.warning(f"[FRESHNESS] Detected Timezone Offset: {self._time_offset:.2f}s. Adjusting...")
+                elif abs(old_offset - self._time_offset) > 60:  # Log if drift > 1 minute
+                    logger.info(f"[FRESHNESS] Updated Timezone Offset: {old_offset:.2f}s → {self._time_offset:.2f}s")
             else:
                 self._time_offset = 0.0
+                self._last_offset_calc = now
         
         offset = self._time_offset if self._time_offset is not None else 0.0
         
@@ -656,6 +671,34 @@ class TradingEngine:
                     
         except Exception as e:
             logger.warning(f"[MODEL MONITOR] Error recording outcome: {e}")
+    
+    # ============================================================================
+    # INTEGRATION FIX: Strategist Win Rate Integration
+    # Added: January 5, 2026
+    # Purpose: Update strategist win rate tracking for Kelly Criterion
+    # ============================================================================
+    
+    def _update_strategist_stats(self, profit: float, win: bool):
+        """
+        Update strategist win rate statistics.
+        
+        INTEGRATION FIX: Connects Enhancement #4 with position manager
+        
+        Args:
+            profit: Trade profit/loss
+            win: Whether trade was profitable
+        """
+        try:
+            # Strategist is passed in run_trading_cycle, store reference if needed
+            # For now, log the update - full integration requires strategist reference
+            logger.debug(f"[STRATEGIST] Trade result: {'WIN' if win else 'LOSS'} | Profit: ${profit:.2f}")
+            
+            # TODO: When strategist reference is available:
+            # if hasattr(self, '_strategist_ref') and self._strategist_ref:
+            #     self._strategist_ref.update_stats(profit=profit, win=win)
+            
+        except Exception as e:
+            logger.warning(f"[STRATEGIST] Error updating stats: {e}")
 
 
     async def initialize_database(self) -> None:

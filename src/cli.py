@@ -53,7 +53,8 @@ def setup_environment():
 
     # 3. Pre-load Heavy Libraries (Torch)
     # This prevents DLL loading hangs on some Windows systems
-    print(">>> [SYSTEM] Starting Aether Bot v5.5.3 (The Architect)...", flush=True)
+    from src.constants import SYSTEM_VERSION
+    print(f">>> [SYSTEM] Starting Aether Bot v{SYSTEM_VERSION} (The Architect)...", flush=True)
     print(">>> [SYSTEM] Pre-loading AI Libraries (Torch)...", flush=True)
     try:
         import torch

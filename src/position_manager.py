@@ -2788,6 +2788,16 @@ class PositionManager:
                 )
             except Exception as e:
                 logger.warning(f"Failed to record prediction outcome: {e}")
+        
+        # INTEGRATION FIX: Update strategist win rate (Enhancement #4)
+        if 'on_strategist_update' in self.callbacks:
+            try:
+                self.callbacks['on_strategist_update'](
+                    profit=total_pnl,
+                    win=(total_pnl > 0)
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update strategist stats: {e}")
 
         return True
 

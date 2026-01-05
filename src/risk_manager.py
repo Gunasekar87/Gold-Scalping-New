@@ -164,6 +164,7 @@ class RiskManager:
         
         # [TIMEZONE AUTO-CORRECTION]
         self._time_offset: Optional[float] = None
+        self._last_offset_calc: float = 0.0
 
         logger.info(f"RiskManager initialized with zone: {zone_config.zone_pips}pips, TP: {zone_config.tp_pips}pips")
 
@@ -369,13 +370,25 @@ class RiskManager:
             tick_ts = float(tick.get('time', 0.0) or 0.0)
             
             # [TIMEZONE AUTO-CORRECTION]
-            if self._time_offset is None and tick_ts > 0:
+            # Recalculate offset every hour to handle server time drift
+            should_recalc = (
+                self._time_offset is None or 
+                (now - self._last_offset_calc) > 3600
+            )
+            
+            if should_recalc and tick_ts > 0:
                 raw_diff = now - tick_ts
                 if abs(raw_diff) > 600:
+                    old_offset = self._time_offset
                     self._time_offset = raw_diff
-                    logger.warning(f"[FRESHNESS] Detected Timezone Offset: {self._time_offset:.2f}s. Adjusting...")
+                    self._last_offset_calc = now
+                    if old_offset is None:
+                        logger.warning(f"[FRESHNESS] Detected Timezone Offset: {self._time_offset:.2f}s. Adjusting...")
+                    elif abs(old_offset - self._time_offset) > 60:
+                        logger.info(f"[FRESHNESS] Updated Timezone Offset: {old_offset:.2f}s → {self._time_offset:.2f}s")
                 else:
                     self._time_offset = 0.0
+                    self._last_offset_calc = now
             
             offset = self._time_offset if self._time_offset is not None else 0.0
 
