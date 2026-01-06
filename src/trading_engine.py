@@ -89,6 +89,10 @@ class TradingConfig:
     timeframe: str = "M1"
 
 
+
+import logging
+logger = logging.getLogger("TradingEngine")
+
 class TradingEngine:
     """
     Core trading engine that orchestrates all trading activities.
@@ -2019,7 +2023,11 @@ class TradingEngine:
                          sym = p.get('symbol') if isinstance(p, dict) else None
                          
                      if sym and sym.lower() == symbol.lower():
-                         positions.append(p)
+                         # FIX: Convert namedtuple to dict for downstream compatibility
+                         if hasattr(p, '_asdict'):
+                             positions.append(p._asdict())
+                         else:
+                             positions.append(p)
             
             # [CRITICAL FIX] Handle Broker API Failure
             if positions is None:
