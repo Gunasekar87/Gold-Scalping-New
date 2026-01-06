@@ -2870,14 +2870,27 @@ class TradingEngine:
                         ui_logger.info(status_msg)
 
             # --- CENTRALIZED MANAGEMENT DELEGATION ---
-            # [CRITICAL ARCHITECTURE FIX]
             # All hedging, recovery, and exit logic must go through 'process_position_management'.
             # Previously, there was duplicate 'Elastic Defense' logic here that caused double-hedging
             # and bypassed the RiskManager's safety checks (cooldowns, freshness, smart timing).
             # We now strictly delegate everything to the core manager.
             
+            # FIX: Robust conversion to dict (handling namedtuple vs object)
+            pos_dicts = []
+            for p in symbol_positions:
+                if hasattr(p, '_asdict'):
+                    pos_dicts.append(p._asdict())
+                elif hasattr(p, '__dict__'):
+                    pos_dicts.append(p.__dict__)
+                elif isinstance(p, dict):
+                    pos_dicts.append(p)
+                else:
+                    # Fallback (should not happen)
+                    logger.warning(f"[POS_CONVERT] Unknown position type: {type(p)}")
+                    continue
+
             positions_managed = await self.process_position_management(
-                symbol, [p.__dict__ for p in symbol_positions], tick,
+                symbol, pos_dicts, tick,
                 point_value, shield, ppo_guardian, nexus, rsi_value=current_rsi, oracle=oracle, pressure_metrics=pressure_metrics
             )
             
