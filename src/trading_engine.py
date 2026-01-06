@@ -2815,7 +2815,7 @@ class TradingEngine:
                 if symbol_positions:
                     bucket_pnl = 0.0
                     if symbol in self.position_manager.bucket_stats:
-                        bucket_pnl = self.position_manager.bucket_stats[symbol].current_profit
+                        bucket_pnl = self.position_manager.bucket_stats[symbol].net_profit
                     
                     status_msg += f"AI Focus:     Monitoring {len(symbol_positions)} positions for Exit/Hedge\n"
                     status_msg += f"Bucket PnL:   ${bucket_pnl:.2f}\n"
