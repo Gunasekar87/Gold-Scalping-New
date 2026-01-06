@@ -1,4 +1,16 @@
-﻿v6.4.0 (ADAPTIVE INTELLIGENCE SYSTEM) - 2026-01-06
+﻿v6.5.0 (SMART HEDGE SYSTEM) - 2026-01-06
+----------------------------------------------------------------
+[NEW] Smart Hedge Intelligence: AI-driven hedge optimization with 3-tier system
+      - Tier 1 (Emergency): Loss > 150 pips → Immediate hedge (no AI)
+      - Tier 2 (Smart Delay): Loss 80-150 pips → Oracle can delay for reversal
+      - Tier 3 (Trend Filter): Loss > 50 pips → Reduce size if fighting strong trend
+[NEW] Oracle Integration: Hedges delayed if Oracle predicts reversal (>70% confidence)
+[NEW] Trend-Aware Sizing: Reduces hedge size by 30% when fighting strong trends
+[IMPROVE] Risk Management: Maintains safety while optimizing hedge entries
+[IMPROVE] Hedge Efficiency: Better entries = lower drawdown, faster recovery
+----------------------------------------------------------------
+
+v6.4.0 (ADAPTIVE INTELLIGENCE SYSTEM) - 2026-01-06
 ----------------------------------------------------------------
 [NEW] Adaptive Risk Scaling: Instead of blocking weak signals, bot now trades with reduced size/tighter TP/SL
       - 70%+ validation: Full size, standard TP/SL (TREND_FOLLOWING)
