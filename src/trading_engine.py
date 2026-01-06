@@ -1991,7 +1991,7 @@ class TradingEngine:
             # [UI FEEDBACK] Log resumption if we were previously paused
             if self.last_pause_reason is not None:
                 logger.info(f"[RESUMED] TRADING RESUMED: Market conditions normalized.")
-                print(f">>> [RESUMED] Market conditions normalized.", flush=True)
+                # print(f">>> [RESUMED] Market conditions normalized.", flush=True)  # Disabled to reduce noise
                 self.last_pause_reason = None
 
             # Get account info
@@ -2809,9 +2809,22 @@ class TradingEngine:
                     f"Oracle:       {oracle_str}\n"
                     f"Pressure:     {pressure_str}\n"
                     f"Market:       RSI {rsi_disp} | ATR {atr_disp}\n"
-                    f"Action:       Holding & Analyzing Tick Data...\n"
-                    f"----------------------------------------------------"
                 )
+
+                # Add specific AI focus for active positions
+                if symbol_positions:
+                    bucket_pnl = 0.0
+                    if symbol in self.position_manager.bucket_stats:
+                        bucket_pnl = self.position_manager.bucket_stats[symbol].current_profit
+                    
+                    status_msg += f"AI Focus:     Monitoring {len(symbol_positions)} positions for Exit/Hedge\n"
+                    status_msg += f"Bucket PnL:   ${bucket_pnl:.2f}\n"
+                    status_msg += f"Action:       Running Wick Intelligence & Profit Checks..."
+                else:
+                    status_msg += f"Action:       Scanning for Entry Opportunities..."
+                
+                status_msg += "\n----------------------------------------------------"
+
                 
                 import sys
                 if sys.platform == 'win32':
