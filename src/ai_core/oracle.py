@@ -7,7 +7,7 @@ import time
 from typing import Optional
 from .nexus_transformer import TimeSeriesTransformer
 from .architect import Architect
-from .graph_neural_net import GNNPredictor
+from .architect import Architect
 from .bayesian_tuner import BayesianOptimizer
 from .contrastive_fusion import ContrastiveFusion
 
@@ -37,7 +37,6 @@ class Oracle:
         self.model_monitor = model_monitor
         
         # --- ADVANCED AI MODULES ---
-        self.gnn = GNNPredictor()
         self.tuner = BayesianOptimizer()
         self.fusion = ContrastiveFusion()
         
@@ -182,8 +181,8 @@ class Oracle:
                 macro_signal = float(self.global_brain.get_bias())
             else:
                 # Fallback (legacy/demo): simulated macro
-                macro_pred = self.gnn.predict(current_price)  # 0..1
-                macro_signal = (macro_pred - 0.5) * 2
+                # Fallback (legacy/demo): simulated macro
+                macro_signal = 0.0 # GNN Removed
         except Exception:
             macro_signal = 0.0
 
