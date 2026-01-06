@@ -101,10 +101,20 @@ class TradeExplainer:
         # Build position breakdown
         position_details = []
         for i, pos in enumerate(positions, 1):
-            pos_type = "BUY" if pos.get('type', 0) == 0 else "SELL"
-            pos_volume = pos.get('volume', 0.0)
-            pos_profit = pos.get('profit', 0.0)
-            pos_price = pos.get('price_open', 0.0)
+            # Handle both dict and Position object types
+            if hasattr(pos, 'type'):
+                # Position object
+                pos_type = "BUY" if pos.type == 0 else "SELL"
+                pos_volume = pos.volume if hasattr(pos, 'volume') else 0.0
+                pos_profit = pos.profit if hasattr(pos, 'profit') else 0.0
+                pos_price = pos.price_open if hasattr(pos, 'price_open') else 0.0
+            else:
+                # Dictionary (fallback)
+                pos_type = "BUY" if pos.get('type', 0) == 0 else "SELL"
+                pos_volume = pos.get('volume', 0.0)
+                pos_profit = pos.get('profit', 0.0)
+                pos_price = pos.get('price_open', 0.0)
+            
             position_details.append(
                 f"      Position #{i}: {pos_type} {pos_volume:.2f} lots @ {pos_price:.5f} → ${pos_profit:+.2f}"
             )

@@ -18,8 +18,8 @@ from enum import Enum, auto
 # ============================================================================
 
 SYSTEM_NAME: Final[str] = "A.E.T.H.E.R."
-SYSTEM_VERSION: Final[str] = "5.6.5"  # Updated: Trader Dashboard Integration Complete (Jan 5, 2026)
-SYSTEM_FULL_NAME: Final[str] = "Adaptive Evolution Trading \u0026 Hedging Execution Robot"
+SYSTEM_VERSION: Final[str] = "6.2.0"  # Updated: Intelligent Risk Governor - Profit-Seeking Exit (Jan 6, 2026)
+SYSTEM_FULL_NAME: Final[str] = "Adaptive Evolution Trading & Hedging Execution Robot"
 
 
 # ============================================================================
@@ -41,8 +41,8 @@ class RiskLimits:
     __slots__ = ()
     
     MAX_EQUITY_RISK_PCT: Final[float] = 0.02  # 2% per trade
-    MAX_DRAWDOWN_PCT: Final[float] = 0.10  # 10% kill switch
-    MAX_DAILY_LOSS_PCT: Final[float] = 0.05  # 5% daily stop
+    MAX_DRAWDOWN_PCT: Final[float] = 0.20  # 20% emergency mode trigger (intelligent exit)
+    MAX_DAILY_LOSS_PCT: Final[float] = 0.05  # 5% daily stop (legacy, not used in v6.2.0)
     MAX_POSITIONS_PER_SYMBOL: Final[int] = 4  # Bucket limit
     MIN_FREE_MARGIN_PCT: Final[float] = 0.30  # 30% buffer
     MAX_LOSS_STREAK: Final[int] = 3  # Max consecutive losses

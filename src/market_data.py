@@ -744,6 +744,62 @@ class MarketDataManager:
             logger.error(f"Failed to get tick data for {symbol}: {e}")
             return None
 
+    def calculate_multi_timeframe_trends(self, symbol: str) -> Dict[str, str]:
+        """
+        Calculate trend direction for M1, M5, and M15 timeframes.
+        Returns: Dict with 'm1_trend', 'm5_trend', 'm15_trend' (UP/DOWN/NEUTRAL).
+        """
+        trends = {}
+        timeframes = {
+            'm1': mt5.TIMEFRAME_M1,
+            'm5': mt5.TIMEFRAME_M5,
+            'm15': mt5.TIMEFRAME_M15
+        }
+        
+        for name, tf in timeframes.items():
+            try:
+                # Fetch last 20 candles for this timeframe
+                rates = mt5.copy_rates_from_pos(symbol, tf, 0, 20)
+                if rates is None or len(rates) < 20:
+                    trends[f'{name}_trend'] = "NEUTRAL"
+                    continue
+                
+                # Identify columns directly from numpy record array
+                closes = rates['close']
+                
+                # Calculate slope (simple linreg)
+                n = len(closes)
+                sum_x = sum(range(n))
+                sum_y = sum(closes)
+                sum_xy = sum(i * closes[i] for i in range(n))
+                sum_xx = sum(i * i for i in range(n))
+                
+                denom = (n * sum_xx - sum_x * sum_x)
+                slope = (n * sum_xy - sum_x * sum_y) / denom if denom != 0 else 0
+                
+                # Normalize slope to basis points
+                current_price = closes[-1]
+                if current_price == 0:
+                    trends[f'{name}_trend'] = "NEUTRAL"
+                    continue
+                    
+                norm_slope = (slope / current_price) * 10000
+                
+                # Determine trend with threshold
+                # > 0.5 bps per bar is a decent trend
+                if norm_slope > 0.5:
+                    trends[f'{name}_trend'] = "UP"
+                elif norm_slope < -0.5:
+                    trends[f'{name}_trend'] = "DOWN"
+                else:
+                    trends[f'{name}_trend'] = "NEUTRAL"
+                    
+            except Exception as e:
+                # Silently fail to neutral on error to avoid spam
+                trends[f'{name}_trend'] = "NEUTRAL"
+                
+        return trends
+
     def get_volatility_ratio(self) -> float:
         """Get current volatility ratio from market state."""
         return self.market_state.get_volatility_ratio()
@@ -802,6 +858,51 @@ class MarketDataManager:
             return bands, True, "OK"
         except Exception as e:
             return None, False, f"BB error: {e}"
+
+    def calculate_macd(self, symbol: str, fast: int = 12, slow: int = 26, signal: int = 9) -> Dict[str, float]:
+        """
+        Calculate MACD metrics (pure python implementation).
+        Returns dict with keys: 'value', 'signal', 'histogram'.
+        """
+        try:
+            candles = self.candles.get_history(symbol)
+            if not candles or len(candles) < slow + signal + 10:
+                return {'value': 0.0, 'signal': 0.0, 'histogram': 0.0}
+                
+            closes = [float(c['close']) for c in candles]
+            
+            def ema(data, period):
+                if not data: return []
+                alpha = 2 / (period + 1)
+                ema_values = [data[0]]  # Seed with first SMA (or just first price approx)
+                for price in data[1:]:
+                    ema_values.append((price * alpha) + (ema_values[-1] * (1 - alpha)))
+                return ema_values
+                
+            ema_fast = ema(closes, fast)
+            ema_slow = ema(closes, slow)
+            
+            # Ensure lengths match (they should)
+            min_len = min(len(ema_fast), len(ema_slow))
+            ema_fast = ema_fast[-min_len:]
+            ema_slow = ema_slow[-min_len:]
+            
+            macd_line = [f - s for f, s in zip(ema_fast, ema_slow)]
+            
+            if len(macd_line) < signal:
+                 return {'value': 0.0, 'signal': 0.0, 'histogram': 0.0}
+                 
+            signal_line = ema(macd_line, signal)
+            
+            last_macd = macd_line[-1]
+            last_signal = signal_line[-1]
+            hist = last_macd - last_signal
+            
+            return {'value': last_macd, 'signal': last_signal, 'histogram': hist}
+            
+        except Exception as e:
+            logger.error(f"MACD calc failed: {e}")
+            return {'value': 0.0, 'signal': 0.0, 'histogram': 0.0}
 
     def calculate_atr(self, symbol: str, period: int = 14) -> float:
         """

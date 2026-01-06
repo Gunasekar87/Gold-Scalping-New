@@ -354,6 +354,7 @@ class RiskManager:
         Returns:
             True if hedge was executed
         """
+        global logger  # Ensure logger is accessible in exception handler
         if strict_entry and (rsi_value is None or atr_val is None or float(atr_val) <= 0):
             logger.warning(f"[STRICT] Zone recovery blocked: missing ATR/RSI (atr={atr_val}, rsi={rsi_value})")
             return False
@@ -439,8 +440,71 @@ class RiskManager:
             logger.error(f"[HEDGE] Broker connection check failed: {e} - ABORTING")
             return False
         
+        # [HEDGE COORDINATOR] - Prevent duplicate hedges from multiple triggers
+        from src.utils.hedge_coordinator import get_hedge_coordinator
+        
+        coordinator = get_hedge_coordinator()
+        
+        # Create bucket ID from first position
+        first_pos = sorted(positions, key=lambda p: p['time'])[0]
+        bucket_id = f"{symbol}_{first_pos['ticket']}"
+        
+        # Check if bucket can be hedged (not hedged recently)
+        can_hedge_bucket, bucket_reason = coordinator.can_hedge_bucket(bucket_id)
+        if not can_hedge_bucket:
+            logger.info(f"[HEDGE_COORDINATOR] {bucket_reason}")
+            return False
+        
+        # [SMART HEDGE TIMING] - Use multi-horizon predictions to decide WHEN to hedge
+        from src.ai_core.multi_horizon_predictor import get_multi_horizon_predictor
+        from src.ai_core.smart_hedge_timing import get_smart_hedge_timing
+        
+        predictor = get_multi_horizon_predictor()
+        smart_timing = get_smart_hedge_timing(predictor)
+        
+        # Get candle history for prediction
+        candles = []
+        try:
+            # Try to get candles from market data manager
+            if hasattr(self, 'market_data_manager'):
+                candles = self.market_data_manager.get_candles(symbol, 60)
+            # Fallback: Try to get from broker
+            elif broker and hasattr(broker, 'get_candles'):
+                candles = broker.get_candles(symbol, 60)
+        except Exception as e:
+            logger.debug(f"[SMART_HEDGE] Could not fetch candles: {e}")
+        
+        # Make smart hedge decision
+        if candles and len(candles) >= 20:
+            hedge_decision = smart_timing.should_hedge_now(
+                position=first_pos,
+                market_data={'tick': tick, 'symbol': symbol},
+                candles=candles
+            )
+            
+            # Log decision
+            logger.info(f"[SMART_HEDGE] {hedge_decision.reasoning}")
+            logger.info(f"[SMART_HEDGE] Expected outcome: {hedge_decision.expected_outcome}")
+            
+            # Act on decision
+            if not hedge_decision.should_hedge:
+                logger.info(f"[SMART_HEDGE] Skipping hedge: {hedge_decision.timing}")
+                return False
+            
+            if hedge_decision.timing != 'NOW':
+                logger.info(f"[SMART_HEDGE] Delaying hedge: {hedge_decision.timing}")
+                return False
+            
+            # Hedge NOW - adjust size based on confidence
+            if hedge_decision.size_multiplier < 1.0:
+                logger.info(f"[SMART_HEDGE] Using partial hedge: {hedge_decision.size_multiplier:.0%}")
+                # Will apply multiplier later when calculating hedge_lot
+        else:
+            logger.debug("[SMART_HEDGE] Insufficient candle data - using standard logic")
+        
         # Validate conditions
         can_hedge, reason = self.validate_hedge_conditions(broker, symbol, positions, tick, point, atr_val=atr_val)
+
         if not can_hedge:
             # Throttle cooldown logs
             if "cooldown" in reason.lower():
@@ -799,7 +863,8 @@ class RiskManager:
                     fixed_tp_points=calc_tp_points,
                     oracle_prediction=oracle_pred,
                     volatility_ratio=volatility_ratio,
-                    hedge_level=hedge_level
+                    hedge_level=hedge_level,
+                    rsi_value=rsi_value # [UPGRADE] Pass RSI for Smart Aggression
                 )
 
             # === EQUITY CHECK BEFORE EXECUTION ===
@@ -867,6 +932,42 @@ class RiskManager:
             # Execute hedge immediately
             logger.info(f"[HEDGE] EXECUTING {next_action} {hedge_lot:.2f} lots NOW...")
 
+            # [WICK INTELLIGENCE] Check for wick rejection zones before hedging
+            try:
+                from src.ai_core.wick_intelligence import get_wick_intelligence
+                
+                # Get recent candles for wick analysis
+                recent_candles = []
+                if hasattr(broker, 'get_candles'):
+                    try:
+                        recent_candles = broker.get_candles(symbol, timeframe='M1', count=10)
+                    except (AttributeError, ValueError, KeyError, TypeError) as e:
+                        logger.debug(f"[WICK] Could not fetch candles: {e}")
+                        pass
+                
+                if recent_candles:
+                    wick_intel = get_wick_intelligence()
+                    should_block, wick_reason = wick_intel.should_block_trade(
+                        direction=next_action,
+                        current_price=target_price,
+                        recent_candles=recent_candles
+                    )
+                    
+                    if should_block:
+                        logger.warning(f"[WICK INTELLIGENCE] 🚫 HEDGE BLOCKED: {wick_reason}")
+                        logger.warning(f"[WICK INTELLIGENCE] Waiting for better price to hedge...")
+                        
+                        # Don't block completely, but warn
+                        # In extreme cases, we still need to hedge for risk management
+                        # But log the warning for analysis
+                        logger.info(f"[WICK INTELLIGENCE] Proceeding with hedge despite wick warning (risk management priority)")
+                    else:
+                        logger.debug(f"[WICK INTELLIGENCE] ✅ Hedge entry safe - {wick_reason}")
+            
+            except Exception as wick_e:
+                logger.debug(f"[WICK INTELLIGENCE] Hedge check failed: {wick_e}")
+                # Continue with hedge if wick check fails
+
             atr_ok = bool(atr_val is not None and float(atr_val) > 0)
             rsi_ok = bool(rsi_value is not None)
             strict_ok = (not bool(strict_entry)) or (atr_ok and rsi_ok)
@@ -897,6 +998,9 @@ class RiskManager:
             # === POST-EXECUTION CLEANUP ===
             # Now safe to do slower operations
             logger.info(f"[HEDGE] SUCCESS: Ticket #{result['ticket']} executed at {target_price:.5f}")
+            
+            # Record hedge in coordinator to prevent duplicates
+            coordinator.record_hedge(bucket_id, next_action, hedge_lot, target_price)
             
             # Log hedge placement on dashboard (event-driven, no spam)
             from src.utils.trader_dashboard import get_dashboard

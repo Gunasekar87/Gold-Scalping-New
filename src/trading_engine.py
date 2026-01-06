@@ -132,10 +132,10 @@ class TradingEngine:
             max_stack=_PTUNE.MAX_HEDGE_STACK,
         ))
         self._governor = RiskGovernor(RiskLimits(
-            max_daily_loss_pct=_RLIM.MAX_DAILY_LOSS_PCT,
-            max_total_exposure=_RLIM.MAX_TOTAL_EXPOSURE,
-            max_spread_points=_RLIM.MAX_SPREAD_POINTS,
-            news_lockout=_RLIM.NEWS_LOCKOUT,
+            max_total_exposure_pct=0.15,  # 15% max margin usage
+            max_drawdown_pct=0.20,  # 20% emergency mode trigger
+            position_limit_per_1k=2,  # 2 positions per $1000 balance
+            news_lockout=False,  # News lockout disabled by default
         ))
 
         # Async database components
@@ -919,6 +919,10 @@ class TradingEngine:
         # (unless it's a recovery trade for hedging/DCA/zone recovery)
         if not is_recovery_trade:
             existing_positions = self.broker.get_positions(symbol)
+            if existing_positions is None: # [CRITICAL FIX] Broker Error Check
+                logger.warning(f"[SAFETY] Failed to check existing positions for {symbol} - Blocking Entry")
+                return False, "Broker Error: Could not check positions"
+                
             if existing_positions:
                 # Check if any position is in the same direction as the signal
                 signal_direction = 0 if signal.action == TradeAction.BUY else 1  # 0=BUY, 1=SELL
@@ -927,23 +931,34 @@ class TradingEngine:
                     if pos.type == signal_direction:
                         return False, f"Position already exists in {signal.action.value} direction - awaiting TP/hedge trigger"
 
-        # --- HFT LAYER 7: ORDER BOOK IMBALANCE (OBI) FILTER ---
-        # If OBI is strongly against us, block the trade.
-        # OBI > 0.3 means Strong Buy Pressure. OBI < -0.3 means Strong Sell Pressure.
+        # --- HFT LAYER 7: ORDER BOOK IMBALANCE (OBI) FILTER (INTELLIGENCE ONLY) ---
+        # OBI and Direction Validator are used for GUIDANCE, NOT BLOCKING
+        # They help choose direction and adjust lot size, but NEVER prevent trades
+        
         obi_applicable = bool(tick.get('obi_applicable', False))
         obi_ok = bool(tick.get('obi_ok', False))
-        if self._strict_entry and obi_applicable and not obi_ok:
-            return False, "OBI unavailable (strict entry)"
-
+        
+        # Get Direction Validator confidence for logging
+        validation_score = signal.metadata.get('validation_score', 0.5)
+        
+        # Log OBI status for information only (NO BLOCKING)
+        if obi_applicable and not obi_ok:
+            logger.info(f"[OBI_INFO] OBI unavailable, using Direction Validator ({validation_score:.0%}) for guidance")
+        
+        # If OBI is available, log it but DON'T block (only inform)
         if obi_ok:
             obi = float(tick.get('obi', 0.0) or 0.0)
-            if abs(obi) > 0.3:  # Only filter if there is significant imbalance
+            if abs(obi) > 0.3:  # Significant imbalance detected
                 if signal.action == TradeAction.BUY and obi < -0.3:
-                    return False, f"HFT Block: Strong Sell Pressure (OBI: {obi:.2f})"
-                if signal.action == TradeAction.SELL and obi > 0.3:
-                    return False, f"HFT Block: Strong Buy Pressure (OBI: {obi:.2f})"
+                    logger.warning(f"[OBI_INFO] Sell pressure detected (OBI: {obi:.2f}) but proceeding with BUY (Validation: {validation_score:.0%})")
+                elif signal.action == TradeAction.SELL and obi > 0.3:
+                    logger.warning(f"[OBI_INFO] Buy pressure detected (OBI: {obi:.2f}) but proceeding with SELL (Validation: {validation_score:.0%})")
+                else:
+                    logger.info(f"[OBI_INFO] OBI aligned with signal (OBI: {obi:.2f}, Validation: {validation_score:.0%})")
 
-        return True, "Trade entry validated"
+        # ALWAYS return True - NEVER block trades
+        # Direction and lot size are already adjusted by Direction Validator
+        return True, "Trade entry validated (intelligence-guided)"
 
     async def execute_trade_entry(self, signal: TradeSignal, lot_size: float,
                           tick: Dict, strategist, shield) -> Optional[Dict]:
@@ -960,6 +975,7 @@ class TradingEngine:
         Returns:
             Order result dict or None if failed
         """
+        global logger  # Ensure logger is accessible in exception handler
         try:
             strict_entry = bool(self._strict_entry)
 
@@ -1020,16 +1036,21 @@ class TradingEngine:
                     obi_ok = bool(signal.metadata.get('obi_ok', obi_ok))
                 except Exception:
                     pass
+            
+            # [SMART OVERRIDE] Do not block on OBI if we have a signal
             if strict_entry and obi_applicable and not obi_ok:
-                logger.warning("[STRICT] Blocking entry: OBI unavailable (applicable but not ok)")
-                return None
+                logger.info("[STRICT] OBI unavailable (applicable but not ok) - Proceeding with trade (AI Decision)")
+                # return None  # DISABLED BLOCKING
 
             atr_ok = bool(atr_value is not None and float(atr_value) > 0.0)
             rsi_ok = bool(rsi_value is not None)
-            strict_ok = (not strict_entry) or (atr_ok and rsi_ok and ((not obi_applicable) or obi_ok))
+            
+            # Modified strict check to be lenient on OBI
+            strict_ok = (not strict_entry) or (atr_ok and rsi_ok)
+            
             if strict_entry and not strict_ok:
                 logger.warning(
-                    f"[STRICT] Blocking entry: strict_ok=False (atr_ok={atr_ok} rsi_ok={rsi_ok} obi_applicable={obi_applicable} obi_ok={obi_ok})"
+                    f"[STRICT] Blocking entry: strict_ok=False (atr_ok={atr_ok} rsi_ok={rsi_ok})"
                 )
                 return None
             
@@ -1503,9 +1524,20 @@ class TradingEngine:
         # [GOD MODE] Fetch candles for Structure Analysis
         candles = self.market_data.candles.get_history(symbol)
 
+        # [GOD MODE] Fetch Equity for Emergency Trigger
+        # Essential to prevent false triggers on default 1000.0 equity
+        account_equity = 1000.0
+        try:
+             acct = self.broker.get_account_info()
+             if acct:
+                 account_equity = acct.get('equity', 1000.0)
+        except Exception as e:
+             logger.warning(f"[GOD MODE] Failed to fetch equity: {e}")
+
         ok_fresh, fresh_reason = self._freshness_ok_for_new_orders(tick)
         
         market_data = {
+            'equity': account_equity, # [CRITICAL FIX] Pass real equity
             'atr': atr_value,  # ATR in points
             'spread': abs(tick['ask'] - tick['bid']),  # Spread in points
             'trend_strength': trend_strength,  # Trend strength 0-1
@@ -1972,6 +2004,11 @@ class TradingEngine:
             # Check for positions first to determine mode (Management vs Hunting)
             positions = self.broker.get_positions(symbol=symbol)
             
+            # [CRITICAL FIX] Handle Broker API Failure
+            if positions is None:
+                logger.warning(f"[SAFETY] Failed to fetch positions for {symbol} - Skipping cycle to prevent ghost trades.")
+                return
+
             if positions:
                 # MANAGEMENT MODE
                 await self._process_existing_positions(symbol, tick, shield, ppo_guardian, nexus, oracle, pressure_metrics)
@@ -2147,6 +2184,122 @@ class TradingEngine:
             # Create Signal Object
             signal = None
             if action != "HOLD" and confidence > 0.5:
+                # [DIRECTION VALIDATOR] - 7-Factor Intelligence Check (with error handling)
+                try:
+                    from src.ai_core.direction_validator import get_direction_validator
+                    
+                    validator = get_direction_validator()
+                    
+                    # Prepare market data for validation
+                    # Handle macro_context being either dict or list
+                    macro_dict = macro_context if isinstance(macro_context, dict) else {}
+                    
+                    # Fetch Multi-Timeframe Trends (Factor 5)
+                    mtf_trends = self.market_data.calculate_multi_timeframe_trends(symbol)
+                    
+                    # [PREDICTIVE INTELLIGENCE] Calculate next 5 candles trajectory
+                    oracle_trajectory = []
+                    if oracle:
+                        # Use same history cache
+                        oracle_trajectory = oracle.predict_trajectory(history[-60:], horizon=5)
+
+                    validation_data = {
+                        'trend': regime.name if hasattr(regime, 'name') else str(regime),
+                        'regime': regime,
+                        'trajectory': oracle_trajectory, # [NEW] Passed to Analyst
+                        'rsi': rsi_value,
+                        'macd': self.market_data.calculate_macd(symbol),
+                        'volume': history[-1].get('tick_volume', 0) if history else 0,
+                        'avg_volume': sum(h.get('tick_volume', 0) for h in history[-20:]) / 20 if len(history) >= 20 else 0,
+                        'current_price': tick['bid'],
+                        'support': macro_dict.get('support', tick['bid'] - 10),
+                        'resistance': macro_dict.get('resistance', tick['bid'] + 10),
+                        'tick': tick,
+                        'avg_spread': tick.get('spread', tick['ask'] - tick['bid']),
+                        'oracle_prediction': oracle_prediction,
+                        'oracle_confidence': oracle_confidence,
+                        'nexus_signal_confidence': confidence,
+                        'm1_trend': mtf_trends.get('m1_trend', 'NEUTRAL'),
+                        'm5_trend': mtf_trends.get('m5_trend', 'NEUTRAL'),
+                        'm15_trend': mtf_trends.get('m15_trend', 'NEUTRAL')
+                    }
+                    
+                    # Validate direction (protected by validator's internal error handling)
+                    validation = validator.validate_direction(action, validation_data, confidence)
+                    
+                    # Apply validation results
+                    original_confidence = confidence
+                    confidence = confidence * validation.confidence_multiplier
+                    confidence = max(0.0, min(1.0, confidence))  # Clamp again
+                    
+                    # Check if we should invert the signal
+                    if validation.should_invert and validation.score < 0.20:
+                        # Very poor validation - flip direction
+                        action = "SELL" if action == "BUY" else "BUY"
+                        logger.warning(f"[DIRECTION_VALIDATOR] Signal INVERTED: {validation.reasoning}")
+                        logger.warning(f"[DIRECTION_VALIDATOR] Failed factors: {validation.failed_factors}")
+                        reason = f"{reason} | INVERTED ({validation.score:.0%})"
+                    elif validation.score >= 0.80:
+                        # Strong validation
+                        logger.info(f"[DIRECTION_VALIDATOR] ✅ Strong validation ({validation.score:.0%}): {validation.reasoning}")
+                        reason = f"{reason} | Validated ({validation.score:.0%})"
+                    elif validation.score < 0.50:
+                        # Weak validation
+                        logger.warning(f"[DIRECTION_VALIDATOR] ⚠️ Weak validation ({validation.score:.0%}): {validation.reasoning}")
+                        logger.warning(f"[DIRECTION_VALIDATOR] Failed factors: {validation.failed_factors}")
+                        reason = f"{reason} | Weak ({validation.score:.0%})"
+                    
+                    # Log confidence adjustment
+                    if abs(original_confidence - confidence) > 0.05:
+                        logger.info(f"[DIRECTION_VALIDATOR] Confidence adjusted: {original_confidence:.2f} → {confidence:.2f}")
+                    
+                    # Store validation score in metadata
+                    validation_score = validation.score
+                    validation_factors = f"{validation.passed_factors}/{validation.total_factors}"
+                    
+                    # [WICK INTELLIGENCE] Check for wick rejection zones
+                    try:
+                        from src.ai_core.wick_intelligence import get_wick_intelligence
+                        
+                        wick_intel = get_wick_intelligence()
+                        should_block, wick_reason = wick_intel.should_block_trade(
+                            direction=action,
+                            current_price=tick['bid'],
+                            recent_candles=history[-10:] if history else []
+                        )
+                        
+                        if should_block:
+                            logger.warning(f"[WICK INTELLIGENCE] 🚫 Trade BLOCKED: {wick_reason}")
+                            
+                            # Suggest better entry
+                            suggested_price = wick_intel.get_safe_entry_suggestion(
+                                direction=action,
+                                current_price=tick['bid'],
+                                recent_candles=history[-10:] if history else []
+                            )
+                            
+                            if suggested_price:
+                                logger.info(
+                                    f"[WICK INTELLIGENCE] 💡 Suggested entry: "
+                                    f"{suggested_price:.2f} (current: {tick['bid']:.2f})"
+                                )
+                            
+                            # Skip this trade
+                            return
+                        else:
+                            logger.debug(f"[WICK INTELLIGENCE] ✅ {wick_reason}")
+                    
+                    except Exception as wick_e:
+                        logger.debug(f"[WICK INTELLIGENCE] Check failed: {wick_e}")
+                        # Continue without wick check if it fails
+                    
+                except Exception as e:
+                    # Direction Validator failed - continue with original signal
+                    logger.error(f"[DIRECTION_VALIDATOR] Validation failed: {e}")
+                    logger.error("[DIRECTION_VALIDATOR] Continuing with original signal (no validation)")
+                    validation_score = 0.5  # Neutral score on error
+                    validation_factors = "0/7"
+                
                 signal = TradeSignal(
                     action=TradeAction.BUY if action == "BUY" else TradeAction.SELL,
                     symbol=symbol,
@@ -2160,10 +2313,13 @@ class TradingEngine:
                         'trend_strength': trend_strength,
                         'rsi': rsi_value,
                         'oracle_prediction': oracle_prediction, # Keep Oracle for penalties
-                        'nexus_signal_confidence': confidence # Map for compatibility
+                        'nexus_signal_confidence': confidence, # Map for compatibility
+                        'validation_score': validation_score,
+                        'validation_factors': validation_factors
                     },
                     timestamp=time.time()
                 )
+
             
             # Use market_regime variable for compatibility with downstream logic
             market_regime = regime
@@ -2666,479 +2822,12 @@ class TradingEngine:
                     except Exception:
                         ui_logger.info(status_msg)
 
-            # Check if we should use Elastic Defense OR fallback to Zone Recovery
-            # If Elastic Defense says "WAIT" (should_hedge=False), we must ensure Zone Recovery doesn't override it blindly.
-            # However, Zone Recovery handles the "Grid" logic.
-            # To make them work together:
-            # - If Elastic Defense triggers, we execute immediately.
-            # - If Elastic Defense says "Wait", we let process_position_management run, BUT we inject the "Wait" signal into Risk Manager?
-            # Actually, simpler: We trust Elastic Defense as the primary trigger for NEW hedges.
-            # But process_position_management also handles CLOSING (TP/SL). We must run that.
-            
-            elastic_hedge_triggered = False
-            
-            if bucket_pnl < 0 and len(symbol_positions) < self.risk_manager.config.max_hedges:
-                last_pos = symbol_positions[-1]
-                
-                # [PHASE 2] Check Stabilizer Trigger (Drawdown based)
-                stabilizer_triggered = False
-                bucket_id = self.position_manager.find_bucket_by_tickets([p.ticket for p in symbol_positions])
-                
-                if len(symbol_positions) == 1:
-                    if bucket_id:
-                        if current_atr is not None and float(current_atr) > 0:
-                            stabilizer_data = {'atr': float(current_atr), 'strict_entry': bool(self._strict_entry), 'atr_ok': True}
-                            stabilizer_triggered = self.position_manager.check_stabilizer_trigger(bucket_id, stabilizer_data)
-                        else:
-                            stabilizer_triggered = False
-
-                # Ask Iron Shield: "Should we hedge now?"
-                if self._strict_entry and (current_atr is None or current_atr <= 0 or current_rsi is None):
-                    should_hedge, req_dist = False, 0.0
-                    logger.warning("[STRICT] Skipping elastic hedge trigger: ATR/RSI unavailable")
-                else:
-                    should_hedge, req_dist = shield.calculate_dynamic_hedge_trigger(
-                        entry_price=last_pos.price_open,
-                        current_price=tick['bid'] if last_pos.type == 0 else tick['ask'],
-                        trade_type=last_pos.type,
-                        atr=current_atr,
-                        rsi=current_rsi,
-                        hedge_count=len(symbol_positions) - 1
-                    )
-                
-                if should_hedge or stabilizer_triggered:
-                    # [AI INTELLIGENCE] Filter Strategic Hedges (IronShield)
-                    # We always allow Stabilizer (Emergency) hedges, but we filter Strategic ones.
-                    if should_hedge and not stabilizer_triggered:
-                        # Construct market_data for AI
-                        trend_strength = self.market_data.calculate_trend_strength(symbol)
-                        if self._strict_entry and hasattr(self.market_data, 'calculate_trend_strength_checked'):
-                            ts_v, ok, treason = self.market_data.calculate_trend_strength_checked(symbol, 20)
-                            if not ok or ts_v is None:
-                                logger.warning(f"[STRICT] Strategic hedge blocked: trend unavailable ({treason})")
-                                should_hedge = False
-                            else:
-                                trend_strength = ts_v
-
-                        macro_context = self.market_data.get_macro_context()
-                        if self._strict_entry and getattr(self.market_data, 'macro_eye', None) is not None and hasattr(self.market_data, 'get_macro_context_checked'):
-                            vec, ok, mreason = self.market_data.get_macro_context_checked()
-                            if not ok:
-                                logger.warning(f"[STRICT] Strategic hedge blocked: macro data unavailable ({mreason})")
-                                should_hedge = False
-                            elif vec is not None:
-                                macro_context = vec
-
-                        if not should_hedge:
-                            # Skip constructing additional AI inputs when strict gating blocks.
-                            pass
-
-                        bb_upper = None
-                        bb_lower = None
-                        if hasattr(self.market_data, 'calculate_bollinger_bands_checked'):
-                            bb, ok, _ = self.market_data.calculate_bollinger_bands_checked(symbol)
-                            if ok and bb:
-                                bb_upper = bb.get('upper')
-                                bb_lower = bb.get('lower')
-                        else:
-                            bb = self.market_data.calculate_bollinger_bands(symbol)
-                            bb_upper = bb.get('upper')
-                            bb_lower = bb.get('lower')
-
-                        market_data = {
-                            'atr': current_atr,
-                            'rsi': current_rsi,
-                            'trend_strength': trend_strength,
-                            'volatility_ratio': self.market_data.market_state.get_volatility_ratio(),
-                            'close': tick['bid'],
-                            'bb_upper': bb_upper,
-                            'bb_lower': bb_lower,
-                            'macro_context': macro_context,
-                        }
-
-                        # Detect Regime
-                        regime_obj = self.supervisor.detect_regime(market_data)
-                        
-                        # Calculate Drawdown for AI
-                        current_drawdown = abs(bucket_pnl) # bucket_pnl is usually negative here
-                        
-                        # Ask The Oracle
-                        hedge_decision = self.hedge_intel.evaluate_hedge_opportunity(
-                            market_data,
-                            "buy" if last_pos.type == 0 else "sell", # Current position type
-                            current_drawdown,
-                            regime_obj.name
-                        )
-                        
-                        if not hedge_decision.should_hedge:
-                            logger.info(f"[AI] Skipping Strategic Hedge: {hedge_decision.reason}")
-                            # Skip this cycle, but don't return False (let other logic run)
-                            # We just reset should_hedge to False so we don't execute below
-                            should_hedge = False
-                    
-                    # Re-check if we still want to hedge (Stabilizer might still be True)
-                    if should_hedge or stabilizer_triggered:
-                        # Calculate Intelligent Lot Size using correct pip_value
-                        recovery_dist_pips = (current_atr / props['point_size']) # Convert price delta to points
-                        
-                        # [AI INTELLIGENCE] Dynamic Grid Step
-                        # If we are hedging, we might want to place it further away if volatility is high?
-                        # Actually, IronShield calculates the lot size.
-                        # We can adjust the 'recovery_dist_pips' if we wanted to widen the grid.
-                        
-                        hedge_lot = shield.calculate_recovery_lot_size(
-                        positions=symbol_positions,
-                        current_price=tick['bid'],
-                        target_recovery_pips=recovery_dist_pips,
-                        symbol_step=0.01, # Assuming standard step
-                        pip_value=props['pip_value'], # Pass the correct value (1.0 for Gold)
-                        atr=current_atr,    # PASSING AI DATA
-                        rsi=current_rsi     # PASSING AI DATA
-                    )
-                    
-                        # Execute Hedge
-                        hedge_type = "SELL" if last_pos.type == 0 else "BUY"
-                        
-                        # Initialize ai_reason early to avoid UnboundLocalError
-                        ai_reason = "Standard Volatility Defense"
-
-                        # [CRITICAL] MARGIN CHECK BEFORE HEDGING
-                        if hasattr(self.broker, 'check_margin'):
-                            if not self.broker.check_margin(symbol, hedge_lot, hedge_type):
-                                # Calculate max possible volume
-                                max_vol = self.broker.get_max_volume(symbol, hedge_type)
-                                max_vol = self.broker.normalize_lot_size(symbol, max_vol)
-                                
-                                if max_vol < 0.01:
-                                    logger.critical(f"[MARGIN CALL] Cannot place hedge! Required: {hedge_lot}, Max Possible: {max_vol}. ABORTING HEDGE.")
-                                    print(f">>> [CRITICAL] MARGIN CALL! Cannot place hedge. Account is over-leveraged.", flush=True)
-                                    
-                                    # [AI INTELLIGENCE] SHED WEIGHT
-                                    # If we can't hedge, we MUST reduce exposure to survive.
-                                    shed_candidates = self.hedge_intel.find_shedding_opportunity(symbol_positions)
-                                    if shed_candidates:
-                                        logger.warning(f"[SURVIVAL] Shedding 2 trades to free margin...")
-                                        # Close the candidates as a batch (faster, no re-fetch per ticket)
-                                        if hasattr(self.broker, 'close_positions'):
-                                            try:
-                                                close_results = await self.broker.close_positions(
-                                                    shed_candidates,
-                                                    trace={
-                                                        'strict_entry': bool(self._strict_entry),
-                                                        'strict_ok': True,
-                                                        'atr_ok': None,
-                                                        'rsi_ok': None,
-                                                        'obi_ok': None,
-                                                        'reason': 'SURVIVAL_SHED_MARGIN',
-                                                    },
-                                                )
-                                            except TypeError:
-                                                close_results = await self.broker.close_positions(shed_candidates)
-                                            for ticket, res in (close_results or {}).items():
-                                                r = res or {}
-                                                ok = r.get('retcode') == mt5.TRADE_RETCODE_DONE
-                                                if ok:
-                                                    logger.warning(f"[SURVIVAL] Shed closed ticket={ticket}")
-                                                else:
-                                                    logger.error(
-                                                        f"[SURVIVAL] Shed close failed ticket={ticket} retcode={r.get('retcode')} comment={r.get('comment', '')}"
-                                                    )
-                                        else:
-                                            for pos in shed_candidates:
-                                                try:
-                                                    await self.broker.close_position(
-                                                        pos.ticket,
-                                                        trace={
-                                                            'strict_entry': bool(self._strict_entry),
-                                                            'strict_ok': True,
-                                                            'atr_ok': None,
-                                                            'rsi_ok': None,
-                                                            'obi_ok': None,
-                                                            'reason': 'SURVIVAL_SHED_MARGIN',
-                                                        },
-                                                    )
-                                                except TypeError:
-                                                    await self.broker.close_position(pos.ticket)
-                                        return True # We took action (shedding), so we are "done" for this tick
-                                    
-                                    return False # Cannot hedge, let it ride
-                                else:
-                                    logger.warning(f"[MARGIN WARNING] Capping hedge size from {hedge_lot} to {max_vol} due to margin constraints.")
-                                    hedge_lot = max_vol
-                                    ai_reason += " [MARGIN CAPPED]"
-
-                        # [AI INTELLIGENCE] Risk Governor & Hedge Policy
-                        # ------------------------------------------------------------------
-                        # 1. Risk Governor Veto Check
-                        if FLAGS.ENABLE_GOVERNOR:
-                            # Get Account Info for PnL %
-                            try:
-                                acct = await self.broker.get_account_info()
-                                balance = float(acct.get('balance', 1.0))
-                                daily_pnl = self.session_stats.get("total_profit", 0.0)
-                                daily_pnl_pct = (daily_pnl / balance) * 100.0 if balance > 0 else 0.0
-                            except Exception:
-                                daily_pnl_pct = 0.0
-
-                            veto, veto_reason = self._governor.veto({
-                                "daily_pnl_pct": daily_pnl_pct,
-                                "total_exposure": sum(p.volume for p in symbol_positions),
-                                "spread_points": (tick['ask'] - tick['bid']) / props['point_size'],
-                                "news_now": self.news_filter.is_news_event()
-                            })
-                            if veto:
-                                logger.warning(f"[RISK-VETO] Hedge blocked by Governor: {veto_reason}")
-                                print(f">>> [RISK-VETO] Hedge blocked: {veto_reason}", flush=True)
-                                return False
-
-                        # 2. Hedge Policy Decision
-                        tp_price = 0.0
-                        sl_price = 0.0
-                        confidence = 0.0
-                        policy_reasons = []
-                        
-                        if FLAGS.ENABLE_POLICY:
-                            # Construct features for the policy
-                            spread_points = (tick['ask'] - tick['bid']) / props['point_size']
-                            atr_points = current_atr / props['point_size']
-
-                            # Strict gating: policy requires real candle/volume context.
-                            candles_hist = self.market_data.candles.get_history(symbol)
-                            if self._strict_entry:
-                                if current_atr is None or current_atr <= 0:
-                                    logger.warning("[STRICT] Policy hedge blocked: ATR unavailable")
-                                    should_hedge = False
-                                if current_rsi is None:
-                                    logger.warning("[STRICT] Policy hedge blocked: RSI unavailable")
-                                    should_hedge = False
-                                if not candles_hist or len(candles_hist) < 21:
-                                    logger.warning("[STRICT] Policy hedge blocked: insufficient candles")
-                                    should_hedge = False
-
-                            # If strict mode blocked this hedge, skip policy evaluation and continue to normal management.
-                            if self._strict_entry and not should_hedge and not stabilizer_triggered:
-                                # Do not return early; allow exits/other management to run.
-                                pass
-                            
-                            # Calculate Trend Slope in points/bar (candle-derived)
-                            candles_hist = self.market_data.candles.get_history(symbol)
-                            closes = []
-                            if candles_hist:
-                                closes = [c.get('close') for c in candles_hist if isinstance(c, dict) and 'close' in c]
-                            if len(closes) >= 2:
-                                try:
-                                    slope_price = linear_regression_slope([float(x) for x in closes[-10:]])
-                                    trend_slope_points = float(slope_price) / max(1e-9, props['point_size'])
-                                except Exception:
-                                    trend_slope_points = 0.0
-                            else:
-                                trend_slope_points = 0.0
-
-                            # [AI INTELLIGENCE] Calculate Volatility Z-Score
-                            # We need a history of ATR or Volume to calculate Z-Score.
-                            # Since we don't have a long history in memory here, we can use a simplified
-                            # relative volume metric if available, or default to 0.0 safely.
-                            # Ideally, MarketData should track this. For now, we use a safe proxy.
-                            vol_z_score = 0.0
-                            if self._strict_entry and should_hedge and hasattr(self.market_data, 'get_volume_z_score_checked'):
-                                vz, ok, vreason = self.market_data.get_volume_z_score_checked(symbol)
-                                if not ok or vz is None:
-                                    logger.warning(f"[STRICT] Policy hedge blocked: vol_z unavailable ({vreason})")
-                                    should_hedge = False
-                                    policy_reasons = [f"strict_block:vol_z_unavailable:{vreason}"]
-                                else:
-                                    vol_z_score = float(vz)
-                            elif hasattr(self.market_data, 'get_volume_z_score'):
-                                vol_z_score = self.market_data.get_volume_z_score(symbol)
-
-                            # Candle-derived breakout quality and structure break (no placeholders)
-                            breakout_quality = 0.5
-                            structure_break = 0.0
-                            if candles_hist and len(candles_hist) >= 2:
-                                last = candles_hist[-1]
-                                try:
-                                    breakout_quality = simple_breakout_quality(float(last['high']), float(last['low']), float(last['close']))
-                                except Exception:
-                                    breakout_quality = 0.5
-                                try:
-                                    structure_break = simple_structure_break(candles_hist, lookback=20)
-                                except Exception:
-                                    structure_break = 0.0
-
-                            features = {
-                                "regime_trend": simple_regime_trend(trend_slope_points, atr_points),
-                                "breakout_quality": breakout_quality,
-                                "structure_break": structure_break,
-                                "drawdown_urgency": min(1.0, current_drawdown / 1000.0), # Crude proxy
-                                "spread_atr": spread_atr(spread_points, atr_points),
-                                "vol_z": vol_z_score,
-                            }
-                            context = {
-                                "side": hedge_type.lower(),
-                                "price": tick['bid'] if hedge_type == "SELL" else tick['ask'],
-                                "atr": current_atr,
-                                # HedgePolicy expects the number of hedges (not total positions).
-                                # Base position counts as 0 hedges.
-                                "open_hedges": max(0, len(symbol_positions) - 1),
-                            }
-                            
-                            decision = self._hedge_policy.decide(features, context)
-                            
-                            hedge_allowed = False
-                            try:
-                                hedge_allowed = bool(decision.get("hedge", False))
-                            except Exception:
-                                try:
-                                    hedge_allowed = bool(decision["hedge"])
-                                except Exception:
-                                    hedge_allowed = False
-
-                            if not hedge_allowed:
-                                # >>> [INTELLIGENCE INJECTION] <<<
-                                # Execute Plan B instead of just skipping
-                                await self._handle_blocked_hedge_strategy(symbol, symbol_positions, decision, tick)
-
-                                decline_reasons = []
-                                try:
-                                    decline_reasons = decision.get("reasons") or []
-                                except Exception:
-                                    decline_reasons = []
-                                if not isinstance(decline_reasons, list):
-                                    decline_reasons = [str(decline_reasons)]
-                                logger.info(f"[HEDGE-SKIP] Policy declined hedge: {decline_reasons}")
-                                if FLAGS.ENABLE_TELEMETRY:
-                                    self._telemetry.write(DecisionRecord(
-                                        ts=time.time(), symbol=symbol, action="hedge-skip", side=hedge_type,
-                                        price=context["price"], lots=hedge_lot,
-                                        features=features, context=context, decision=decision
-                                    ))
-                                # Do NOT return early here (would skip exit logic). Just skip placing this hedge.
-                                should_hedge = False
-                                
-                            # Apply Policy Outputs (be defensive: when hedge is declined, TP/SL may be omitted)
-                            tp_price = 0.0
-                            sl_price = 0.0
-                            confidence = 0.0
-                            policy_reasons = []
-
-                            try:
-                                confidence = float(decision.get("confidence", 0.0) or 0.0)
-                            except Exception:
-                                confidence = 0.0
-
-                            try:
-                                policy_reasons = decision.get("reasons") or []
-                            except Exception:
-                                policy_reasons = []
-                            if not isinstance(policy_reasons, list):
-                                policy_reasons = [str(policy_reasons)]
-
-                            if hedge_allowed:
-                                try:
-                                    tp_price = float(decision.get("tp_price", 0.0) or 0.0)
-                                except Exception:
-                                    tp_price = 0.0
-                                try:
-                                    sl_price = float(decision.get("sl_price", 0.0) or 0.0)
-                                except Exception:
-                                    sl_price = 0.0
-
-                            ai_reason += f" | Conf: {confidence:.2f}"
-
-                        will_execute_hedge = bool(stabilizer_triggered or should_hedge)
-                        if will_execute_hedge:
-                            # Construct AI Reason for User
-                            if stabilizer_triggered:
-                                ai_reason = "STABILIZER PROTOCOL: Drawdown > 1.5x ATR. Emergency Hedge."
-                            elif hedge_type == "BUY":
-                                if current_rsi > 75: ai_reason = f"Extreme Bullish Momentum (RSI {current_rsi:.1f}). Max Aggression (1.25x) to counter Sell loss."
-                                elif current_rsi > 60: ai_reason = f"Strong Bullish Trend (RSI {current_rsi:.1f}). Increased Aggression (1.15x)."
-                                else: ai_reason = f"Normal Market (RSI {current_rsi:.1f}). Standard Overpower (1.05x)."
-                            else: # SELL
-                                if current_rsi < 25: ai_reason = f"Extreme Bearish Momentum (RSI {current_rsi:.1f}). Max Aggression (1.25x) to counter Buy loss."
-                                elif current_rsi < 40: ai_reason = f"Strong Bearish Trend (RSI {current_rsi:.1f}). Increased Aggression (1.15x)."
-                                else: ai_reason = f"Normal Market (RSI {current_rsi:.1f}). Standard Overpower (1.05x)."
-
-                            # Use UI Logger for visible terminal output
-                            # [USER REQUEST] Standardized Hedge Log
-
-                            # --- AI PLAN LOG ---
-                            hedge_plan_msg = (
-                                f"\n>>> [AI DEFENSE PLAN] ACTIVATING HEDGE <<<\n"
-                                f"Trigger:      {ai_reason}\n"
-                                f"Action:       OPEN {hedge_type} {hedge_lot} lots\n"
-                                f"Objective:    Neutralize Drawdown & Prepare for Recovery\n"
-                                f"Status:       EXECUTING NOW...\n"
-                                f"----------------------------------------------------"
-                            )
-                            import sys
-                            if sys.platform == 'win32':
-                                ui_logger.info(hedge_plan_msg)
-                            else:
-                                try:
-                                    ui_logger.info(hedge_plan_msg)
-                                except Exception:
-                                    ui_logger.info(hedge_plan_msg)
-                            # -------------------
-
-                            TradingLogger.log_initial_trade(f"{symbol}_HEDGE_{len(symbol_positions)}", {
-                                'action': hedge_type,
-                                'symbol': symbol,
-                                'lots': hedge_lot,
-                                'entry_price': tick['bid'] if hedge_type == "SELL" else tick['ask'],
-                                'tp_price': tp_price if tp_price > 0 else "Dynamic",
-                                'tp_atr': 0.0,
-                                'tp_pips': "Bucket",
-                                'hedges': [], # No nested hedges
-                                'atr_pips': current_atr * 10000, # Approx
-                                'reasoning': f"[HEDGE {len(symbol_positions)}] {ai_reason}",
-                                'confidence': confidence,
-                                'reasons': policy_reasons
-                            })
-
-                            if FLAGS.ENABLE_TELEMETRY:
-                                self._telemetry.write(DecisionRecord(
-                                    ts=time.time(), symbol=symbol, action="hedge-open", side=hedge_type,
-                                    price=tick['bid'] if hedge_type == "SELL" else tick['ask'],
-                                    lots=hedge_lot,
-                                    features=features if FLAGS.ENABLE_POLICY else {},
-                                    context=context if FLAGS.ENABLE_POLICY else {},
-                                    decision={"tp_price": tp_price, "sl_price": sl_price, "confidence": confidence, "reasons": policy_reasons}
-                                ))
-
-                            # Execute directly via broker to bypass standard entry checks
-                            self.broker.execute_order(
-                                action="OPEN",
-                                symbol=symbol,
-                                order_type=hedge_type,
-                                volume=hedge_lot,
-                                price=tick['bid'] if hedge_type == "SELL" else tick['ask'],
-                                sl=0.0, tp=0.0,
-                                strict_entry=bool(self._strict_entry),
-                                strict_ok=(not self._strict_entry) or (current_atr is not None and float(current_atr) > 0 and current_rsi is not None),
-                                atr_ok=bool(current_atr is not None and float(current_atr) > 0),
-                                rsi_ok=bool(current_rsi is not None),
-                                obi_ok=bool(tick.get('obi_ok', False)),
-                                trace_reason="OPEN_ELASTIC_HEDGE",
-                                comment="Elastic_Hedge"
-                            )
-                            elastic_hedge_triggered = True
-
-                            # [AI INTELLIGENCE] Update Bucket TP immediately
-                            # Now that we have a new hedge, the "Survival TP" changes.
-                            # We must update all trades in the bucket to the new target.
-                            if bucket_id:
-                                await self.position_manager.update_bucket_tp(self.broker, symbol, bucket_id, tick['bid'])
-                            return True # Managed
-
-            # If Elastic Defense didn't trigger a hedge, we still check for EXITS (TP/SL)
-            # But we should probably prevent Zone Recovery from adding a hedge if Elastic Defense said "Wait".
-            # For now, let's assume process_position_management is mainly for Exits and Zone Recovery.
-            # If we want to disable old Zone Recovery, we should do it in Risk Manager or here.
-            # Let's rely on the fact that Elastic Defense is "tighter" or "smarter".
-            # If Elastic Defense says "Wait" (e.g. RSI), but Zone Recovery says "Hedge" (Fixed Pips),
-            # we have a conflict.
-            # To fix this, we will modify Risk Manager to respect RSI as well (which we did in previous step via IronShield update).
+            # --- CENTRALIZED MANAGEMENT DELEGATION ---
+            # [CRITICAL ARCHITECTURE FIX]
+            # All hedging, recovery, and exit logic must go through 'process_position_management'.
+            # Previously, there was duplicate 'Elastic Defense' logic here that caused double-hedging
+            # and bypassed the RiskManager's safety checks (cooldowns, freshness, smart timing).
+            # We now strictly delegate everything to the core manager.
             
             positions_managed = await self.process_position_management(
                 symbol, [p.__dict__ for p in symbol_positions], tick,

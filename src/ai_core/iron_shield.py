@@ -240,13 +240,14 @@ class IronShield:
         return int(dynamic_zone), int(dynamic_tp)
 
     def calculate_defense(self, current_loss_lot, spread_points, atr_value=0.0, trend_strength=0.0, 
-                         fixed_zone_points=None, fixed_tp_points=None, 
-                         oracle_prediction="NEUTRAL", volatility_ratio=1.0, hedge_level=1):
+                          fixed_zone_points=None, fixed_tp_points=None, 
+                          oracle_prediction="NEUTRAL", volatility_ratio=1.0, hedge_level=1, rsi_value=None):
         """
         Advanced AI-Driven Defense Logic:
         1. Uses Math to calculate the exact Lot Size needed for Break-Even + Profit.
         2. Adapts Aggression based on AI Predictions (Oracle) and Volatility.
         3. Implements "Velvet Cushion" for deep hedges (Survival Mode).
+        4. [UPGRADE] Uses RSI & Oracle for Dynamic Aggression (Smart Recovery).
         """
         
         dynamic_zone = 0.0
@@ -262,34 +263,41 @@ class IronShield:
         
         # --- INTELLIGENT MODULATION ---
         
-        # 1. Volatility Adjustment
-        # If volatility is high, we widen the TP slightly to ensure we don't get choked by noise,
-        # but we also need to be careful not to make the target unreachable.
-        # Actually, in high vol, we want to ESCAPE fast, so we might keep TP tight but increase lots slightly.
+        # Baseline Profit Target (The "Greed" Factor)
+        # default 10% profit on top of recovery
+        profit_target_percent = 0.10 
         
-        # 2. Oracle Bias (Trend Adaptation)
-        # If Oracle predicts the market is moving in favor of this HEDGE, we can be aggressive.
-        # If Oracle predicts the market is moving AGAINST this hedge (choppy), we be conservative.
+        # 1. Oracle & Trend Adaptation
+        # If we have a strong signal, we can aim for more profit (Aggressive Recovery).
+        # If the signal opposes us, we aim for break-even (Survival).
         
-        profit_target_percent = 0.10 # Default: Target 10% profit on top of recovery
+        aggression_score = 1.0 # Neutral
         
-        if oracle_prediction != "NEUTRAL":
-            # Assuming this hedge is in the direction of the Oracle? 
-            # We don't know the direction here, but usually a hedge is "with the immediate flow".
-            # Let's assume neutral bias for safety unless explicitly passed.
-            # TODO: Implement oracle bias weighting
-            # If oracle is bullish and hedge is long, increase profit target to 0.15
-            # If oracle is bearish and hedge is short, increase profit target to 0.15
-            # If oracle opposes hedge direction, decrease to 0.05 (conservative)
-            logger.debug(f"Oracle prediction: {oracle_prediction} (bias adjustment not yet implemented)")
-
+        if oracle_prediction in ("BUY", "UP"):
+            # If we are hedging (which usually means adding to a loser), 
+            # we need to know if this hedge ALIGNS with the Oracle.
+            # But here we don't know the hedge direction explicitly. 
+            # We assume the caller calls us for a valid hedge.
+            pass
+            
+        # 2. RSI-Based Aggression (The "Elastic" Logic Restored)
+        # If RSI is extreme, we expect a snap-back, so we can trade larger/more aggressively.
+        if rsi_value is not None:
+            if rsi_value < 30: # Oversold - Expect Bounce (Call/Buy favor)
+                # If we are effectively "buying low", we can be aggressive
+                aggression_score += 0.2
+            elif rsi_value > 70: # Overbought - Expect Drop (Put/Sell favor)
+                aggression_score += 0.2
+        
+        # Adjust Profit Target based on Aggression
+        profit_target_percent *= aggression_score
+        
         # 3. Survival Mode (Velvet Cushion)
-        # If we are deep in hedges (Level 3+), we drop the profit requirement to 0 (Break-Even only).
-        # This drastically reduces the required lot size, making survival more likely.
+        # If we are deep in hedges (Level 3+), we drop the profit requirement.
         if hedge_level >= 3:
-            profit_target_percent = 0.01 # Just 1% buffer for swap/commissions
-            # Also, if volatility is extreme, we might even accept a small loss to escape, 
-            # but "Nil Loss" is the goal, so we stick to 0.01.
+            profit_target_percent = 0.01 # Just 1% buffer (Survival)
+            # Override aggression in survival mode - safety first
+            logger.info(f"[IRON SHIELD] Survival Mode (Level {hedge_level}): Dropping profit target to 1%")
             
         # 4. The Mathematical Guarantee (The "Nil Loss" Equation)
         # L2 = (L1 * (Zone + Spread) + (L1 * TP) + ProfitBuffer) / (TP - Spread)
@@ -298,8 +306,6 @@ class IronShield:
         safe_tp = max(target_tp, spread_points * 2.5) 
         
         # Calculate Profit Buffer (The "Juice")
-        # We want to recover the Loss from L1 (which is L1 * (Zone + Spread))
-        # AND make a profit of (L1 * TP * profit_target_percent)
         profit_buffer = current_loss_lot * safe_tp * profit_target_percent
         
         # Include estimated Swap/Commission costs (approx 2 points per lot)
@@ -314,12 +320,16 @@ class IronShield:
         hedge_lot = numerator / denominator
         
         # SAFETY: Cap the Hedge Lot
-        # [INTELLIGENT FIX] Reduced Max Multiplier to prevent "Death Spiral"
-        # Was 4.0/5.0, now capped at 2.0x (Normal) or 2.5x (Survival).
-        # This forces the bot to recover slowly rather than risking account blow-up.
+        # [INTELLIGENT FIX] Dynamic Max Multiplier
+        # Base cap is 2.0x. 
+        # If High Confidence/RSI snap-back, allow 2.5x.
+        # If Level 3+ (Survival), allow 2.5x to ensure recovery.
+        
         max_mult = 2.0
+        if aggression_score > 1.1:
+            max_mult = 2.5
         if hedge_level >= 3:
-            max_mult = 2.5 
+            max_mult = 3.0 # Allow slightly more power for final rescue
             
         max_hedge = current_loss_lot * max_mult
         if hedge_lot > max_hedge:

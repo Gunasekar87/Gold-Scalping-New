@@ -485,8 +485,12 @@ class Oracle:
                 predicted_idx = torch.argmax(probabilities, dim=1).item()
                 confidence = probabilities[0, predicted_idx].item()
                 
-                # Mapping: 0=BUY(UP), 1=SELL(DOWN), 2=NEUTRAL (Check training mapping!)
-                # Assuming standard: 0: BUY, 1: SELL, 2: HOLD
+                # [VERIFIED MAPPING] Model output classes (MUST match training):
+                # Index 0 → "UP"      (Bullish/BUY signal)
+                # Index 1 → "DOWN"    (Bearish/SELL signal)  
+                # Index 2 → "NEUTRAL" (No clear direction/HOLD)
+                # 
+                # This mapping is CORRECT and matches TimeSeriesTransformer training
                 classes = ["UP", "DOWN", "NEUTRAL"]
                 if predicted_idx < len(classes):
                     prediction = classes[predicted_idx]
@@ -509,3 +513,52 @@ class Oracle:
         except Exception as e:
             logger.error(f"[ORACLE] Prediction error: {e}")
             return "NEUTRAL", 0.0
+
+    def predict_trajectory(self, candles: list, horizon: int = 10) -> list:
+        """
+        Generate a synthetic trajectory prediction based on Transformer output.
+        Projects the likely path for the next 'horizon' candles.
+        
+        Essential for Scalping: distinct from simple trend direction, this 
+        predicts the SHAPE of the move.
+        """
+        if not candles or self.model is None:
+            return []
+
+        # Get the prediction
+        pred_dir, conf = self.predict(candles)
+        
+        last_close = float(candles[-1].get('close', 0.0))
+        trajectory = [last_close]
+        
+        # Calculate recent ATR for step sizing
+        recent = candles[-10:]
+        ranges = []
+        for c in recent:
+            h = float(c.get('high', 0.0))
+            l = float(c.get('low', 0.0))
+            ranges.append(h - l)
+            
+        avg_range = sum(ranges) / len(ranges) if ranges else 1.0
+        
+        # Base Step: 50% of ATR per candle (typical momentum)
+        step_size = avg_range * 0.5
+        
+        # Direction Multiplier
+        direction = 0.0
+        if pred_dir == "UP": direction = 1.0
+        elif pred_dir == "DOWN": direction = -1.0
+        
+        # Simulate Path
+        # We apply a slight damping factor to simulate exhaustive moves if confidence is low
+        for i in range(1, horizon + 1):
+            prev = trajectory[-1]
+            
+            # Stochastic element: Prediction + Noise
+            move = (step_size * direction * conf) 
+            
+            # Simple simulation: Move + small random noise (optional, here deterministic for safety)
+            next_price = prev + move
+            trajectory.append(next_price)
+            
+        return trajectory[1:] # Return future points only

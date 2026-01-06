@@ -622,9 +622,9 @@ class PositionManager:
             # Approximate equity check if not in market_data
             if not signal:
                  # Check if deficit is critical
-                 if deficit > (acct_equity * 0.05):
+                 if deficit > (acct_equity * 0.20):
                      signal = True
-                     logger.warning(f"[GOD MODE] EMERGENCY TRIGGER: Deficit ${deficit:.2f} > 5% Equity. Forcing Recovery.")
+                     logger.warning(f"[GOD MODE] EMERGENCY TRIGGER: Deficit ${deficit:.2f} > 20% Equity. Forcing Recovery.")
                  
                  # Also fallback to time-based if > 30 mins
                  duration_mins = (time.time() - stats.open_time) / 60
@@ -1748,6 +1748,61 @@ class PositionManager:
 
             # 4. AI CONFIDENCE EXIT (PPO Guardian with bucket-specific logic)
             ai_exit = False
+            
+            # [WICK INTELLIGENCE EXIT] Check if we should exit at wick extreme
+            # OPPOSITE LOGIC FROM ENTRIES: Wicks are GOOD exit zones!
+            wick_exit = False
+            wick_exit_reason = ""
+            
+            try:
+                from src.ai_core.wick_intelligence import get_wick_intelligence
+                
+                # Get recent candles for wick analysis
+                recent_candles = []
+                if hasattr(self.mt5_adapter, 'get_candles'):
+                    try:
+                        recent_candles = self.mt5_adapter.get_candles(first_pos.symbol, timeframe='M1', count=10)
+                    except (AttributeError, ValueError, KeyError, TypeError) as e:
+                        logger.debug(f"[WICK EXIT] Could not fetch candles: {e}")
+                        pass
+                
+                if recent_candles and len(positions) > 0:
+                    wick_intel = get_wick_intelligence()
+                    
+                    # Determine position type
+                    position_type = "BUY" if first_pos.is_buy else "SELL"
+                    
+                    # Calculate current profit in pips
+                    if first_pos.is_buy:
+                        profit_pips = (current_price - entry_price) * pip_multiplier
+                    else:
+                        profit_pips = (entry_price - current_price) * pip_multiplier
+                    
+                    # Check if we should exit at wick
+                    should_exit, wick_reason = wick_intel.should_exit_at_wick(
+                        position_type=position_type,
+                        current_price=current_price,
+                        recent_candles=recent_candles,
+                        profit_pips=profit_pips
+                    )
+                    
+                    if should_exit:
+                        wick_exit = True
+                        wick_exit_reason = wick_reason
+                        logger.info(f"[WICK EXIT] {wick_reason}")
+                        
+                        # If in profit, this is a strong exit signal
+                        if profit_pips > 5:
+                            logger.info(f"[WICK EXIT] ✅ Taking profit at wick rejection zone (+{profit_pips:.1f} pips)")
+                    else:
+                        # Log if we're monitoring a potential wick exit
+                        if "HOLD" in wick_reason:
+                            logger.debug(f"[WICK MONITOR] {wick_reason}")
+            
+            except Exception as wick_e:
+                logger.debug(f"[WICK EXIT] Check failed: {wick_e}")
+                # Continue without wick exit if check fails
+
             ai_confidence = 0.0
             ppo_reason = ""
             
@@ -1802,6 +1857,7 @@ class PositionManager:
                 profit_exit or
                 stop_loss_exit or
                 ai_exit or
+                wick_exit or  # [WICK INTELLIGENCE] Exit at rejection zones
                 emergency_exit or
                 spread_cost_exit
             )
