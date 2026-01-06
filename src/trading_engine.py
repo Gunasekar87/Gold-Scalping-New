@@ -2444,10 +2444,58 @@ class TradingEngine:
                 trend_strength=trend_strength
             )
             
+            # === ADAPTIVE VALIDATION MULTIPLIER ===
+            # Instead of blocking trades, scale size/TP based on validation score
+            validation_multiplier = 1.0
+            tp_multiplier = 1.0
+            sl_multiplier = 1.0
+            adaptive_strategy = "STANDARD"
+            
+            if validation_score >= 0.70:
+                # Strong validation - Full confidence
+                validation_multiplier = 1.0
+                tp_multiplier = 1.0
+                sl_multiplier = 1.0
+                adaptive_strategy = "TREND_FOLLOWING"
+                logger.info(f"[ADAPTIVE] Strong signal ({validation_score:.0%}) → Full size, standard TP/SL")
+                
+            elif validation_score >= 0.50:
+                # Moderate validation - Cautious scalping
+                validation_multiplier = 0.6  # 60% size
+                tp_multiplier = 0.6  # Tighter TP (60% of normal)
+                sl_multiplier = 0.7  # Tighter SL (70% of normal)
+                adaptive_strategy = "SCALPING"
+                logger.info(f"[ADAPTIVE] Moderate signal ({validation_score:.0%}) → Reduced size (60%), tight TP/SL (Scalp mode)")
+                
+            elif validation_score >= 0.40:
+                # Weak validation - Very cautious
+                validation_multiplier = 0.4  # 40% size
+                tp_multiplier = 0.4  # Very tight TP
+                sl_multiplier = 0.5  # Very tight SL
+                adaptive_strategy = "MICRO_SCALP"
+                logger.info(f"[ADAPTIVE] Weak signal ({validation_score:.0%}) → Minimal size (40%), micro-scalp TP/SL")
+                
+            elif validation_score >= 0.30:
+                # Very weak - Range trading only
+                validation_multiplier = 0.25  # 25% size
+                tp_multiplier = 0.3  # Extremely tight TP
+                sl_multiplier = 0.4  # Extremely tight SL
+                adaptive_strategy = "RANGE_FADE"
+                logger.info(f"[ADAPTIVE] Very weak signal ({validation_score:.0%}) → Range fade (25% size, tight exits)")
+            else:
+                # Critical - Block trade
+                logger.warning(f"[ADAPTIVE] Critical divergence ({validation_score:.0%}) → Trade BLOCKED")
+                return
+            
+            # Store multipliers in signal metadata for TP/SL calculation
+            signal.metadata['tp_multiplier'] = tp_multiplier
+            signal.metadata['sl_multiplier'] = sl_multiplier
+            signal.metadata['adaptive_strategy'] = adaptive_strategy
+            
             # === APPLY INTELLIGENCE PENALTIES ===
-            # Combine all penalties (Regime * Oracle * Brain * Pressure)
-            # Example: 0.5 * 0.5 * 1.0 * 1.0 = 0.25 (Quarter Size)
-            total_penalty = regime_penalty * oracle_penalty * brain_penalty * pressure_penalty
+            # Combine all penalties (Validation * Regime * Oracle * Brain * Pressure)
+            # Example: 0.6 * 0.5 * 0.5 * 1.0 * 1.0 = 0.15 (15% size)
+            total_penalty = validation_multiplier * regime_penalty * oracle_penalty * brain_penalty * pressure_penalty
             
             if total_penalty < 1.0:
                 old_lot = lot_size
@@ -2561,7 +2609,15 @@ class TradingEngine:
                 
             # Get dynamic params from Shield
             zone_points, tp_points = shield.get_dynamic_params(atr_points)
-            tp_pips = tp_points # This is in pips (e.g. 25.0)
+            
+            # [ADAPTIVE INTELLIGENCE] Apply TP/SL multipliers based on validation score
+            tp_mult = signal.metadata.get('tp_multiplier', 1.0)
+            sl_mult = signal.metadata.get('sl_multiplier', 1.0)
+            
+            tp_points = tp_points * tp_mult
+            zone_points = zone_points * sl_mult  # Zone acts as SL distance
+            
+            tp_pips = tp_points # This is in pips (e.g. 25.0 * 0.6 = 15.0 for scalp)
             
             is_buy = signal.action == TradeAction.BUY
             entry_price = tick['ask'] if is_buy else tick['bid']
@@ -2573,10 +2629,11 @@ class TradingEngine:
                 virtual_tp_price = entry_price - (tp_pips / pip_multiplier)
 
             # Generate Clean Entry Summary
+            adaptive_strat = signal.metadata.get('adaptive_strategy', 'STANDARD')
             summary = (
                 f"\n>>> [AI ENTRY PLAN] <<<\n"
                 f"Initial Trade: {signal.action.value} {lot_size} lots @ {entry_price:.5f}\n"
-                f"Target:        Dynamic (Bucket Logic)\n"
+                f"Mode:          {adaptive_strat} (Validation: {validation_score:.0%})\n"
                 f"Virtual TP:    {virtual_tp_price:.5f} (+{tp_pips:.1f} pips)\n"
                 f"----------------------------------------------------\n"
                 f"Strategy:      {signal.metadata.get('worker', 'Unknown')}\n"
@@ -2589,7 +2646,7 @@ class TradingEngine:
             clean_summary = (
                 f"\n>>> [AI ENTRY PLAN] <<<\n"
                 f"Initial Trade: {signal.action.value} {lot_size} lots @ {entry_price:.5f}\n"
-                f"Target:        Dynamic (Bucket Logic)\n"
+                f"Mode:          {adaptive_strat} (Validation: {validation_score:.0%})\n"
                 f"Virtual TP:    {virtual_tp_price:.5f} (+{tp_pips:.1f} pips)\n"
                 f"----------------------------------------------------\n"
                 f"Strategy:      {signal.metadata.get('worker', 'Unknown')}\n"
