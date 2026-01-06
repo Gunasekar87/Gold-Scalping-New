@@ -2360,13 +2360,25 @@ class TradingEngine:
                         print(f"[AI THINKING] Regime: {regime.name} | Worker: {worker_name} | Action: HOLD | Reason: {reason}", flush=True)
                 return
             
-            # [CRITICAL FIX] Double Entry Prevention
-            # Check per-symbol cooldown (e.g., 60 seconds)
-            last_entry_ts = self.entry_cooldowns.get(symbol, 0)
-            if time.time() - last_entry_ts < 60:
-                # Silently skip to prevent log spam, or log debug
-                # logger.debug(f"[COOLDOWN] Entry blocked for {symbol}. Last entry was {time.time() - last_entry_ts:.1f}s ago.")
-                return
+            # [CRITICAL FIX] Double Entry Prevention (Thread-Safe)
+            # Use atomic check-and-set to prevent race conditions
+            import threading
+            if not hasattr(self, '_entry_lock'):
+                self._entry_lock = threading.Lock()
+            
+            # Atomic cooldown check and set
+            with self._entry_lock:
+                last_entry_ts = self.entry_cooldowns.get(symbol, 0)
+                time_since_last = time.time() - last_entry_ts
+                
+                if time_since_last < 60:
+                    # Cooldown active - block this entry
+                    logger.debug(f"[COOLDOWN] Entry blocked for {symbol}. Last entry was {time_since_last:.1f}s ago.")
+                    return
+                
+                # Reserve this entry slot immediately (atomic)
+                self.entry_cooldowns[symbol] = time.time()
+                logger.debug(f"[COOLDOWN] Entry slot reserved for {symbol}. Cooldown set.")
 
             # Show AI decision on dashboard (event-driven, no spam)
             dashboard = get_dashboard()
@@ -2583,9 +2595,9 @@ class TradingEngine:
 
             logger.info(f"[TRADE] VALIDATION PASSED: All entry conditions met")
             
-            # Update last_trade_time IMMEDIATELY to prevent race conditions
+            # Update last_trade_time for global tracking
             self.last_trade_time = time.time()
-            self.entry_cooldowns[symbol] = time.time()  # [FIX] Lock symbol for 60s
+            # Note: entry_cooldowns[symbol] already set atomically above
 
             # Execute trade
             # --- GENERATE ENTRY SUMMARY ---
