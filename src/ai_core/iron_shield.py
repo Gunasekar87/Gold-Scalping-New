@@ -1,4 +1,7 @@
 import math
+import logging
+
+logger = logging.getLogger("IronShield")
 
 class IronShield:
     def __init__(self, initial_lot=0.01, zone_pips=20, tp_pips=20, config=None):
