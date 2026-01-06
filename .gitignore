@@ -64,3 +64,18 @@ evolution_state.json
 data/position_state.json
 data/position_state.*.json
 data/optimizer_state.json
+
+# Cleanup and temporary files
+*.tmp
+*.bak
+*.backup
+*.old
+.verification_report.md
+code_cleanup_script.py
+error.log
+
+# Test artifacts
+.pytest_cache/
+.coverage
+test_results/
+htmlcov/
