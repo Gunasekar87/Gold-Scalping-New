@@ -2500,8 +2500,9 @@ class TradingEngine:
             if total_penalty < 1.0:
                 old_lot = lot_size
                 lot_size = round(lot_size * total_penalty, 4)
-                # Ensure we don't go below minimum lot (usually 0.01)
-                lot_size = max(lot_size, 0.01)
+                # [ADAPTIVE FIX] Allow smaller lots for weak signals (min 0.001 instead of 0.01)
+                # This enables MICRO_SCALP and RANGE_FADE modes to actually reduce size
+                lot_size = max(lot_size, 0.001)
                 lot_reason += f" (AI Penalty: {total_penalty:.2f}x)"
                 logger.info(f"[AI_COUNCIL] Consensus Weak. Reducing Size: {old_lot} -> {lot_size} lots")
 
@@ -2614,8 +2615,16 @@ class TradingEngine:
             tp_mult = signal.metadata.get('tp_multiplier', 1.0)
             sl_mult = signal.metadata.get('sl_multiplier', 1.0)
             
+            original_tp = tp_points
+            original_zone = zone_points
+            
             tp_points = tp_points * tp_mult
             zone_points = zone_points * sl_mult  # Zone acts as SL distance
+            
+            # Log adaptive adjustments
+            if tp_mult < 1.0 or sl_mult < 1.0:
+                logger.info(f"[ADAPTIVE] TP adjusted: {original_tp:.1f} → {tp_points:.1f} pips (x{tp_mult})")
+                logger.info(f"[ADAPTIVE] SL adjusted: {original_zone:.1f} → {zone_points:.1f} pips (x{sl_mult})")
             
             tp_pips = tp_points # This is in pips (e.g. 25.0 * 0.6 = 15.0 for scalp)
             
