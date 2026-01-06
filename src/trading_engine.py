@@ -148,6 +148,7 @@ class TradingEngine:
         # Rate limiting
         self.last_trade_time = 0.0
         self.trade_cooldown_active = False
+        self.entry_cooldowns = {}  # [FIX] Per-symbol entry cooldowns to prevent double entries
         
         # Status Tracking (For UI Feedback)
         self.last_pause_reason = None
@@ -2335,6 +2336,14 @@ class TradingEngine:
                         print(f"[AI THINKING] Regime: {regime.name} | Worker: {worker_name} | Action: HOLD | Reason: {reason}", flush=True)
                 return
             
+            # [CRITICAL FIX] Double Entry Prevention
+            # Check per-symbol cooldown (e.g., 60 seconds)
+            last_entry_ts = self.entry_cooldowns.get(symbol, 0)
+            if time.time() - last_entry_ts < 60:
+                # Silently skip to prevent log spam, or log debug
+                # logger.debug(f"[COOLDOWN] Entry blocked for {symbol}. Last entry was {time.time() - last_entry_ts:.1f}s ago.")
+                return
+
             # Show AI decision on dashboard (event-driven, no spam)
             dashboard = get_dashboard()
             dashboard.ai_decision(
@@ -2503,6 +2512,7 @@ class TradingEngine:
             
             # Update last_trade_time IMMEDIATELY to prevent race conditions
             self.last_trade_time = time.time()
+            self.entry_cooldowns[symbol] = time.time()  # [FIX] Lock symbol for 60s
 
             # Execute trade
             # --- GENERATE ENTRY SUMMARY ---
