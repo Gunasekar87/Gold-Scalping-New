@@ -856,8 +856,8 @@ class RiskManager:
                         logger.debug(f"[HEDGE] Oracle prediction unavailable: {e}")
                 
                 # Use calculate_defense with NET EXPOSURE
-                hedge_lot = shield.calculate_defense(
-                    exposure_to_hedge, # Use Net Exposure instead of just last pos
+                total_required_hedge = shield.calculate_defense(
+                    exposure_to_hedge, # Use Net Exposure
                     spread_points,
                     fixed_zone_points=calc_zone_points,
                     fixed_tp_points=calc_tp_points,
@@ -866,6 +866,29 @@ class RiskManager:
                     hedge_level=hedge_level,
                     rsi_value=rsi_value # [UPGRADE] Pass RSI for Smart Aggression
                 )
+
+                # [CRITICAL LOGIC FIX] Prevent Redundant Stacking
+                # We must subtract the volume of hedges we ALREADY have.
+                # If we need 0.14 lots total, and we have 0.15, we do NOTHING.
+                
+                current_friendly_volume = 0.0
+                target_type_id = 0 if next_action == "BUY" else 1 # 0=Buy, 1=Sell
+                
+                for p in positions:
+                    if p.get('type') == target_type_id:
+                        current_friendly_volume += p.get('volume', 0.0)
+
+                logger.info(f"[HEDGE_CALC] Total Required: {total_required_hedge} | Existing Friendly: {current_friendly_volume} | Opposing Risk: {exposure_to_hedge}")
+
+                # Calculate what is actually missing
+                hedge_lot = total_required_hedge - current_friendly_volume
+                
+                if hedge_lot < 0.01:
+                    logger.info(f"[HEDGE] Existing friendly volume ({current_friendly_volume}) is sufficient for defense (Target: {total_required_hedge}). Holding.")
+                    return True # logic "handled" successfully by doing nothing
+                
+                # If we need more, we take the delta
+                logger.info(f"[HEDGE] Adjusting hedge size: Need {total_required_hedge} - Have {current_friendly_volume} = Placing {hedge_lot}")
 
             # === EQUITY CHECK BEFORE EXECUTION ===
             account_info = broker.get_account_info()
