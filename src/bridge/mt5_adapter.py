@@ -245,6 +245,10 @@ class MT5Adapter(BrokerAdapter):
                 magic=p.magic
             ) for p in positions]
 
+    def get_all_positions(self) -> Optional[list]:
+        """Helper to get all positions without symbol filtering."""
+        return self.get_positions(symbol=None)
+
     def get_history_deals(self, ticket: int) -> list:
         deals = mt5.history_deals_get(ticket=ticket)
         if deals:
