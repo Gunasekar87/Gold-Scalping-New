@@ -88,6 +88,26 @@ class DirectionValidator:
 
         # 3. Normalize (-1.0 to 1.0)
         market_bias = total_bias / total_weight if total_weight > 0 else 0.0
+
+        # [INTELLIGENCE] Strict Trend Guard: Prevent fighting strong trends
+        trend_bias = biases.get('trend', 0.0)
+        rsi_val = float(market_data.get('rsi', 50.0))
+        guard_penalty = 0.0
+        
+        # Guard against Selling in Strong Uptrend
+        if trend_bias > 0.6 and direction == "SELL":
+            if rsi_val < 80: # Unless extremely overbought
+                market_bias += 0.5 # Push bias towards BUY (opposing the SELL signal)
+                guard_penalty = 1.0
+                details.append(f"TREND_GUARD: BLOCKED SELL (Uptrend+RSI{rsi_val:.1f})")
+
+        # Guard against Buying in Strong Downtrend
+        if trend_bias < -0.6 and direction == "BUY":
+            if rsi_val > 20: # Unless extremely oversold
+                market_bias -= 0.5 # Push bias towards SELL (opposing the BUY signal)
+                guard_penalty = 1.0
+                details.append(f"TREND_GUARD: BLOCKED BUY (Downtrend+RSI{rsi_val:.1f})")
+
         
         # 4. Compare Market Bias to Proposed Direction
         proposed_numeric = 1.0 if direction == 'BUY' else -1.0

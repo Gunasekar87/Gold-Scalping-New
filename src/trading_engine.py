@@ -2003,7 +2003,13 @@ class TradingEngine:
 
             # Process management for existing positions
             # Check for positions first to determine mode (Management vs Hunting)
-            positions = self.broker.get_positions(symbol=symbol)
+            # [ROBUSTNESS] Fetch all positions and filter manually to handle case-sensitivity
+            # This prevents "Ghost Entries" where bot misses existing trades due to 'xauusd' vs 'XAUUSD'
+            all_pos = self.broker.get_all_positions()
+            if all_pos is None:
+                positions = None
+            else:
+                positions = [p for p in all_pos if p['symbol'].lower() == symbol.lower()]
             
             # [CRITICAL FIX] Handle Broker API Failure
             if positions is None:
