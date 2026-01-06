@@ -2009,7 +2009,17 @@ class TradingEngine:
             if all_pos is None:
                 positions = None
             else:
-                positions = [p for p in all_pos if p['symbol'].lower() == symbol.lower()]
+                # FIX: Handle both Object (dot notation) and Dict (subscript) just in case
+                positions = []
+                for p in all_pos:
+                     # Adapt to Object or Dict
+                     if hasattr(p, 'symbol'):
+                         sym = p.symbol
+                     else:
+                         sym = p.get('symbol') if isinstance(p, dict) else None
+                         
+                     if sym and sym.lower() == symbol.lower():
+                         positions.append(p)
             
             # [CRITICAL FIX] Handle Broker API Failure
             if positions is None:
