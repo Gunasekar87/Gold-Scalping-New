@@ -1110,7 +1110,10 @@ class RiskManager:
                 return False
 
         except Exception as e:
-            logger.error(f"Zone recovery error: {e}")
+            import traceback
+            import logging
+            traceback.print_exc()
+            logging.getLogger("RiskManager").error(f"Zone recovery error: {e}")
             return False
 
     def get_risk_status(self, symbol: str) -> Dict[str, Any]:
