@@ -2456,6 +2456,32 @@ class TradingEngine:
                 trend_strength=trend_strength
             )
             
+            # [FORENSIC LOGGING] Track initial lot calculation
+            initial_lot_size = lot_size
+            logger.info(f"[DECISION_PATH] ═══════════════════════════════════════════")
+            logger.info(f"[DECISION_PATH] TRADE DECISION ANALYSIS")
+            logger.info(f"[DECISION_PATH] ═══════════════════════════════════════════")
+            logger.info(f"[DECISION_PATH] 1. SIGNAL GENERATION:")
+            logger.info(f"[DECISION_PATH]    Worker: {signal.metadata.get('worker', 'Unknown')}")
+            logger.info(f"[DECISION_PATH]    Action: {signal.action.value}")
+            logger.info(f"[DECISION_PATH]    Confidence: {signal.confidence:.2%}")
+            logger.info(f"[DECISION_PATH]    Reason: {signal.reason}")
+            logger.info(f"[DECISION_PATH] 2. MARKET CONTEXT:")
+            logger.info(f"[DECISION_PATH]    Regime: {market_regime.name}")
+            logger.info(f"[DECISION_PATH]    ATR: {atr_value:.4f}")
+            logger.info(f"[DECISION_PATH]    Trend Strength: {trend_strength:.2f}")
+            logger.info(f"[DECISION_PATH]    RSI: {rsi_value:.1f}")
+            logger.info(f"[DECISION_PATH]    Validation Score: {validation_score:.0%}")
+            logger.info(f"[DECISION_PATH] 3. INITIAL LOT CALCULATION:")
+            logger.info(f"[DECISION_PATH]    Base Lot: {initial_lot_size:.4f}")
+            logger.info(f"[DECISION_PATH]    Reason: {lot_reason}")
+            logger.info(f"[DECISION_PATH] 4. PENALTIES TO APPLY:")
+            logger.info(f"[DECISION_PATH]    Regime Penalty: {regime_penalty:.2f}x")
+            logger.info(f"[DECISION_PATH]    Oracle Penalty: {oracle_penalty:.2f}x")
+            logger.info(f"[DECISION_PATH]    Brain Penalty: {brain_penalty:.2f}x")
+            logger.info(f"[DECISION_PATH]    Pressure Penalty: {pressure_penalty:.2f}x")
+            
+
             # === ADAPTIVE VALIDATION MULTIPLIER ===
             # Instead of blocking trades, scale size/TP based on validation score
             validation_multiplier = 1.0
@@ -2528,7 +2554,22 @@ class TradingEngine:
             if lot_size <= 0:
                 print(f">>> [DEBUG] Lot Size Rejected: {lot_reason}", flush=True)
                 logger.info(f"[POSITION] SIZING REJECTED: {lot_reason}")
+                logger.info(f"[DECISION_PATH] ═══════════════════════════════════════════")
+                logger.info(f"[DECISION_PATH] TRADE REJECTED: Lot size {lot_size:.4f} <= 0")
+                logger.info(f"[DECISION_PATH] ═══════════════════════════════════════════")
                 return
+            
+            # [FORENSIC LOGGING] Track final lot size after all multipliers
+            logger.info(f"[DECISION_PATH] 5. ADAPTIVE MULTIPLIER:")
+            logger.info(f"[DECISION_PATH]    Validation Multiplier: {validation_multiplier:.2f}x")
+            logger.info(f"[DECISION_PATH]    TP Multiplier: {tp_multiplier:.2f}x")
+            logger.info(f"[DECISION_PATH]    SL Multiplier: {sl_multiplier:.2f}x")
+            logger.info(f"[DECISION_PATH]    Strategy: {adaptive_strategy}")
+            logger.info(f"[DECISION_PATH] 6. FINAL LOT CALCULATION:")
+            logger.info(f"[DECISION_PATH]    Initial: {initial_lot_size:.4f}")
+            logger.info(f"[DECISION_PATH]    After Penalties: {lot_size:.4f}")
+            logger.info(f"[DECISION_PATH]    Total Multiplier: {(lot_size / initial_lot_size if initial_lot_size > 0 else 0):.4f}x")
+
 
             # Normalize lot size to broker requirements BEFORE logging or executing
             # This ensures the logs match the actual execution
@@ -2539,10 +2580,16 @@ class TradingEngine:
                      # Only log if significant change
                      if abs(raw_lot - lot_size) > 0.000001:
                         logger.info(f"[LOT ADJUST] Normalized {raw_lot} -> {lot_size} to match broker requirements")
+                        logger.info(f"[DECISION_PATH]    Broker Normalized: {raw_lot:.4f} -> {lot_size:.4f}")
 
             # Only log lot size if the signal was just logged (i.e., it changed)
             if self._last_signal_logged:
                 logger.info(f"[POSITION] SIZE CALCULATED: {lot_size} lots | Reason: {lot_reason}")
+                logger.info(f"[DECISION_PATH] 7. FINAL EXECUTION:")
+                logger.info(f"[DECISION_PATH]    Final Lot Size: {lot_size:.4f}")
+                logger.info(f"[DECISION_PATH]    Entry Price: ~{tick.get('ask' if signal.action == TradeAction.BUY else 'bid', 0):.2f}")
+                logger.info(f"[DECISION_PATH] ═══════════════════════════════════════════")
+
 
             # Final validation (is_recovery_trade=False for normal entries)
             # [OPTIMIZATION] For Continuous Scalping, we relax the cooldown check if the signal is strong
