@@ -153,31 +153,50 @@ class WickIntelligence:
         elif is_at_lower_wick and has_significant_lower:
             rejection_zone = "LOWER"
         
-        # Safety assessment
+        # Safety assessment - ONLY block at EXTREME positions
         safe_to_buy = True
         safe_to_sell = True
         reasoning = "No wick rejection detected"
         
+        # REFINED LOGIC: Only block at the EXTREME of wicks
+        # Upper wick: Only block BUY if very close to the top (<10%)
+        # Lower wick: Only block SELL if very close to the bottom (<10%)
+        
         if rejection_zone == "UPPER":
-            # At upper wick = Sellers rejected buyers
-            # DON'T BUY here (price likely to drop)
-            safe_to_buy = False
-            reasoning = (
-                f"⚠️ UPPER WICK REJECTION: Price at {current_price:.2f} "
-                f"is {dist_from_high:.1f}% from recent high {highest_high:.2f}. "
-                f"Upper wick is {max_upper_wick_pct:.1f}% of candle. "
-                f"Buyers were rejected - expect downward pressure."
-            )
+            # At upper wick - check if we're at the EXTREME top
+            if dist_from_high < 10.0:  # Within 10% of the absolute high
+                # DON'T BUY at the extreme top (price likely to drop)
+                safe_to_buy = False
+                reasoning = (
+                    f"⚠️ UPPER WICK REJECTION: Price at {current_price:.2f} "
+                    f"is {dist_from_high:.1f}% from recent high {highest_high:.2f}. "
+                    f"Upper wick is {max_upper_wick_pct:.1f}% of candle. "
+                    f"Buyers were rejected at extreme - expect downward pressure."
+                )
+            else:
+                # Price is near upper wick but not at extreme - ALLOW trades
+                reasoning = (
+                    f"✅ Near upper wick ({dist_from_high:.1f}% from high) but not at extreme. "
+                    f"Trades allowed."
+                )
+                
         elif rejection_zone == "LOWER":
-            # At lower wick = Buyers rejected sellers
-            # DON'T SELL here (price likely to rise)
-            safe_to_sell = False
-            reasoning = (
-                f"⚠️ LOWER WICK REJECTION: Price at {current_price:.2f} "
-                f"is {dist_from_low:.1f}% from recent low {lowest_low:.2f}. "
-                f"Lower wick is {max_lower_wick_pct:.1f}% of candle. "
-                f"Sellers were rejected - expect upward pressure."
-            )
+            # At lower wick - check if we're at the EXTREME bottom
+            if dist_from_low < 10.0:  # Within 10% of the absolute low
+                # DON'T SELL at the extreme bottom (price likely to rise)
+                safe_to_sell = False
+                reasoning = (
+                    f"⚠️ LOWER WICK REJECTION: Price at {current_price:.2f} "
+                    f"is {dist_from_low:.1f}% from recent low {lowest_low:.2f}. "
+                    f"Lower wick is {max_lower_wick_pct:.1f}% of candle. "
+                    f"Sellers were rejected at extreme - expect upward pressure."
+                )
+            else:
+                # Price is near lower wick but not at extreme - ALLOW trades
+                reasoning = (
+                    f"✅ Near lower wick ({dist_from_low:.1f}% from low) but not at extreme. "
+                    f"Trades allowed."
+                )
         
         return WickAnalysis(
             has_significant_upper_wick=has_significant_upper,
@@ -191,6 +210,7 @@ class WickIntelligence:
             safe_to_sell=safe_to_sell,
             reasoning=reasoning
         )
+
     
     def _analyze_single_candle(self, candle: Dict) -> Dict:
         """
