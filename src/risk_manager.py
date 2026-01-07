@@ -552,8 +552,23 @@ class RiskManager:
                 logger.warning(f"[ZONE] Skipping zone recovery: ATR unavailable for {symbol}")
                 return False
 
-            # Determine which hedge level we're at (based on number of positions)
-            hedge_level = len(positions)  # 1 = HEDGE1, 2 = HEDGE2, 3 = HEDGE3
+            # [FIX] Determine which hedge level we're at
+            # CRITICAL: Use saved hedge_level from metadata, NOT position count
+            # Position count can be wrong after restart or if positions are manually closed
+            
+            # Get saved hedge level from metadata
+            saved_hedge_level = trade_metadata.get('current_hedge_level', 0)
+            
+            # If no saved level, calculate from position count (first time)
+            if saved_hedge_level == 0:
+                # Initial position = hedge_level 0
+                # Initial + 1 hedge = hedge_level 1
+                # Initial + 2 hedges = hedge_level 2, etc.
+                hedge_level = max(0, len(positions) - 1)
+                logger.info(f"[ZONE_DEBUG] No saved hedge_level, calculated from positions: {hedge_level}")
+            else:
+                hedge_level = saved_hedge_level
+                logger.info(f"[ZONE_DEBUG] Using saved hedge_level: {hedge_level}")
             
             logger.info(f"[ZONE_DEBUG] Current hedge level: {hedge_level} | Positions: {len(positions)}")
             
@@ -1121,7 +1136,14 @@ class RiskManager:
             atr_ok = bool(atr_val is not None and float(atr_val) > 0)
             rsi_ok = bool(rsi_value is not None)
             strict_ok = (not bool(strict_entry)) or (atr_ok and rsi_ok)
+            # [FIX] Save updated hedge_level to metadata BEFORE executing
+            new_hedge_level = hedge_level + 1
+            trade_metadata['current_hedge_level'] = new_hedge_level
+            position_manager.active_learning_trades[first_ticket] = trade_metadata
             
+            logger.info(f"[ZONE_DEBUG] Executing hedge {new_hedge_level}, saving to metadata")
+            
+            # Execute hedge order
             result = broker.execute_order(
                 action="OPEN",
                 symbol=symbol,
