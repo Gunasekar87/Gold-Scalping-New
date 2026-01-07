@@ -600,7 +600,6 @@ class RiskManager:
                     # INTELLIGENT SCALING: Logarithmic instead of linear
                     # Prevents over-scaling in extreme volatility
                     # 2.5x vol -> 1.25x zone | 4.0x vol -> 1.50x zone | 6.0x vol -> 1.75x zone
-                    import math
                     log_scale = 1.0 + (math.log(max(volatility_ratio, 2.0) / 2.0) * 0.5)
                     raw_scale = min(log_scale, 1.75)  # Cap at 1.75x (was 2.0x)
                     raw_scale = max(1.0, raw_scale)
