@@ -50,7 +50,7 @@ class WickIntelligenceConfig:
     
     # Wick detection thresholds
     WICK_THRESHOLD_PCT = 30.0             # Wick must be >30% of candle to be significant
-    PROXIMITY_THRESHOLD_PCT = 20.0        # Within 20% of extreme triggers warning
+    PROXIMITY_THRESHOLD_PCT = 35.0        # Within 35% of extreme triggers warning (was 20%)
     
     # Exit decision thresholds
     STRONG_EXIT_PROFIT_PIPS = 10.0        # >10 pips = strong exit signal
