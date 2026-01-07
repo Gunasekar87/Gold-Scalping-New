@@ -34,6 +34,7 @@ from .utils.news_filter import NewsFilter
 from .utils.news_calendar import NewsCalendar
 from .ai_core.tick_pressure import TickPressureAnalyzer
 from .utils.trader_dashboard import get_dashboard
+from .ai_core.trap_hunter import TrapHunter
 
 # [AI INTELLIGENCE] New Policy & Governance Modules
 from src.config.settings import FLAGS, POLICY as _PTUNE, RISK as _RLIM
@@ -125,6 +126,7 @@ class TradingEngine:
         self.news_filter = NewsFilter() # [AI INTELLIGENCE] Initialize News Filter
         self.news_calendar = NewsCalendar() # [HIGHEST INTELLIGENCE] Event Horizon
         self.tick_analyzer = tick_analyzer if tick_analyzer else TickPressureAnalyzer() # [HIGHEST INTELLIGENCE] Tick Pressure
+        self.trap_hunter = TrapHunter(self.tick_analyzer) # [FAKE-OUT DEFENSE] Initialize Trap Hunter
 
         # [AI INTELLIGENCE] Initialize Policy & Governance
         self._telemetry = TelemetryWriter()
@@ -1427,7 +1429,7 @@ class TradingEngine:
 
     async def process_position_management(self, symbol: str, positions: List[Dict],
                                   tick: Dict, point: float, shield, ppo_guardian,
-                                  nexus=None, rsi_value: float = 50.0, oracle=None, pressure_metrics=None) -> bool:
+                                  rsi_value: float = 50.0, oracle=None, pressure_metrics=None, trap_hunter=None) -> bool:
         """
         Process position management for a symbol.
 
@@ -1441,6 +1443,7 @@ class TradingEngine:
             nexus: Optional NexusBrain instance
             oracle: Optional Oracle instance (Layer 4)
             pressure_metrics: Optional Tick Pressure Metrics
+            trap_hunter: Optional TrapHunter instance for fakeout detection
 
         Returns:
             True if positions were managed (closed/opened)
@@ -1994,8 +1997,8 @@ class TradingEngine:
             logger.info(f"[ZONE_CHECK] Calling execute_zone_recovery for {symbol} with {len(positions_dict)} positions | ATR: {safe_atr:.5f} | VolRatio: {safe_vol:.2f}")
             zone_recovery_executed = self.risk_manager.execute_zone_recovery(
                 self.broker, symbol, positions_dict, tick, point_value,
-                shield, ppo_guardian, self.position_manager, bool(self._strict_entry), nexus, oracle=oracle, atr_val=atr_value,
-                volatility_ratio=volatility_ratio, rsi_value=rsi_value
+                shield, ppo_guardian, self.position_manager, bool(self._strict_entry), oracle=oracle, atr_val=atr_value,
+                volatility_ratio=volatility_ratio, rsi_value=rsi_value, trap_hunter=trap_hunter, pressure_metrics=pressure_metrics
             )
             if zone_recovery_executed:
                 logger.info(f"[ZONE] RECOVERY EXECUTED for {symbol}")
@@ -2224,7 +2227,7 @@ class TradingEngine:
 
             if positions:
                 # MANAGEMENT MODE
-                await self._process_existing_positions(symbol, tick, shield, ppo_guardian, nexus, oracle, pressure_metrics)
+                await self._process_existing_positions(symbol, tick, shield, ppo_guardian, oracle, pressure_metrics)
                 return # STRICTLY RETURN - No new entries while positions exist
 
             # HUNTING MODE
@@ -2244,7 +2247,8 @@ class TradingEngine:
 
             if self._strict_entry:
                 # Candle sufficiency check (prevents ATR/RSI/trend falling back to neutral defaults)
-                history = self.market_data.candles.get_history(symbol)
+                # [FRESHNESS] Force refresh candles to ensure strict entry checks use latest data
+                history = self.market_data.candles.get_history(symbol, force_refresh=True)
                 if not history or len(history) < self._strict_entry_min_candles:
                     self._log_entry_gate(
                         f"Insufficient candles: have={len(history) if history else 0} need={self._strict_entry_min_candles}"
@@ -2331,7 +2335,8 @@ class TradingEngine:
                 'atr': atr_value,
                 'trend_strength': trend_strength,
                 'volatility_ratio': self.market_data.get_volatility_ratio(),
-                'macro_context': macro_context
+                'macro_context': macro_context,
+                'pressure_metrics': pressure_metrics
             }
             
             regime = self.supervisor.detect_regime(supervisor_data)
@@ -2394,6 +2399,21 @@ class TradingEngine:
             # Final clamp
             confidence = max(0.0, min(1.0, confidence))
                 
+            # [TRAP HUNTER] Check for institutional traps (Fakeouts/Icebergs)
+            # This is the "Ghost Protocol" veto that blocks entries into manipulated zones.
+            
+            # 1. Update Trap Hunter with latest data
+            self.trap_hunter.scan(symbol, history, tick)
+            
+            # 2. Check veto
+            is_trap = self.trap_hunter.is_trap(action)
+            if action != "HOLD" and is_trap:
+                log_msg = f"[TRAP DETECTED] {action} signal blocked by Trap Hunter (Fakeout/Iceberg/Manipulation)."
+                logger.warning(log_msg)
+                action = "HOLD"
+                reason = f"{reason} | [TRAP-VETO] Institutional Trap Detected"
+                confidence = 0.0
+
             # Create Signal Object
             signal = None
             if action != "HOLD" and confidence > 0.5:
@@ -2434,7 +2454,8 @@ class TradingEngine:
                         'nexus_signal_confidence': confidence,
                         'm1_trend': mtf_trends.get('m1_trend', 'NEUTRAL'),
                         'm5_trend': mtf_trends.get('m5_trend', 'NEUTRAL'),
-                        'm15_trend': mtf_trends.get('m15_trend', 'NEUTRAL')
+                        'm15_trend': mtf_trends.get('m15_trend', 'NEUTRAL'),
+                        'pressure': pressure_metrics # [COUNCIL] Pass Pressure to Validator
                     }
                     
                     # Validate direction (protected by validator's internal error handling)
@@ -3018,7 +3039,7 @@ class TradingEngine:
                                f"Holding {symbol} positions defensively (No new risk added).")
                 setattr(self, f"_plan_b_veto_{symbol}", True)
 
-    async def _process_existing_positions(self, symbol: str, tick: Dict, shield, ppo_guardian, nexus, oracle=None, pressure_metrics=None) -> bool:
+    async def _process_existing_positions(self, symbol: str, tick: Dict, shield, ppo_guardian, oracle=None, pressure_metrics=None) -> bool:
         """
         Process management for existing positions.
         Returns True if positions were managed (skipping new entries).
@@ -3055,6 +3076,10 @@ class TradingEngine:
             logger.debug(f"[PROCESS_POS] Calling process_position_management with {len(symbol_positions)} positions")
             
             # --- ELASTIC DEFENSE PROTOCOL INTEGRATION ---
+            # [FRESHNESS] Enforce fresh data for critical position management (Hedging/Exit)
+            # This ensures RSI/ATR are calculated on the absolute latest candle state.
+            self.market_data.candles.get_history(symbol, force_refresh=True)
+
             # 1. Get Live Market Intelligence
             current_atr = self.market_data.calculate_atr(symbol)
             current_rsi = self.market_data.calculate_rsi(symbol)
@@ -3071,7 +3096,8 @@ class TradingEngine:
                     'atr': current_atr,
                     'trend_strength': self.market_data.calculate_trend_strength(symbol),
                     'volatility_ratio': self.market_data.get_volatility_ratio(),
-                    'macro_context': self.market_data.get_macro_context()
+                    'macro_context': self.market_data.get_macro_context(),
+                    'pressure_metrics': pressure_metrics
                 }
                 regime = self.supervisor.detect_regime(supervisor_data)
                 
@@ -3202,7 +3228,7 @@ class TradingEngine:
 
             positions_managed = await self.process_position_management(
                 symbol, pos_dicts, tick,
-                point_value, shield, ppo_guardian, nexus, rsi_value=current_rsi, oracle=oracle, pressure_metrics=pressure_metrics
+                point_value, shield, ppo_guardian, rsi_value=current_rsi, oracle=oracle, pressure_metrics=pressure_metrics, trap_hunter=self.trap_hunter
             )
             
             logger.debug(f"[PROCESS_POS] process_position_management returned: {positions_managed}")

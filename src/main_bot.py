@@ -44,7 +44,7 @@ from .ai_core.oracle import Oracle
 from .utils.news_filter import NewsFilter
 
 # Import existing components (to be gradually migrated)
-from .ai_core.nexus_brain import NexusBrain
+
 from .ai_core.ppo_guardian import PPOGuardian
 from .ai_core.iron_shield import IronShield
 from .ai_core.strategist import Strategist
@@ -316,7 +316,7 @@ class AetherBot:
         logger.info("Initializing legacy AI components (Nexus Brain, Iron Shield)...")
 
         # AI Components
-        self.nexus = NexusBrain(config=self.config)
+
         # self.ppo_guardian is already initialized in initialize_components
 
         # Risk and Strategy

@@ -220,9 +220,9 @@ class CandleManager:
         self._cache: Dict[str, Dict] = {}
         self._cache_lock = Lock()
         try:
-            self._cache_timeout = float(os.getenv("AETHER_CANDLE_CACHE_TIMEOUT_S", "30"))
+            self._cache_timeout = float(os.getenv("AETHER_CANDLE_CACHE_TIMEOUT_S", "5"))
         except Exception:
-            self._cache_timeout = 30.0
+            self._cache_timeout = 5.0
         if self._cache_timeout < 0:
             self._cache_timeout = 0.0
 

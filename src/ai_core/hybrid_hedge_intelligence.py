@@ -87,17 +87,24 @@ class HybridHedgeIntelligence:
         # === LAYER 5: DIRECTIONAL CONSENSUS (AI, TIE-BREAKER) ===
         directional_factor = self._analyze_directional_consensus(market_data, oracle)
         factors['directional'] = directional_factor
+
+        # === LAYER 6: PRESSURE INTELLIGENCE (ORDER FLOW) ===
+        # Use real-time order flow to Size the Hedge.
+        # Strong Pressure in Hedge Direction = Larger Hedge (Confidence).
+        pressure_factor = self._analyze_pressure(market_data, positions)
+        factors['pressure'] = pressure_factor
         
         # === CALCULATE FINAL HEDGE SIZE ===
         base_hedge = self._calculate_base_hedge(positions, market_data)
         
         # Apply factors (weighted by reliability)
         final_hedge = base_hedge
-        final_hedge *= volatility_factor  # Weight: 0.35 (most reliable)
+        final_hedge *= volatility_factor  # Weight: 0.35
         final_hedge *= sr_factor           # Weight: 0.25
         final_hedge *= time_factor         # Weight: 0.20
-        final_hedge *= oracle_factor       # Weight: 0.15 (cautious)
-        final_hedge *= directional_factor  # Weight: 0.05 (tie-breaker)
+        final_hedge *= oracle_factor       # Weight: 0.10
+        final_hedge *= directional_factor  # Weight: 0.05
+        final_hedge *= pressure_factor     # Weight: 0.05 (High Impact if Extreme)
         
         # === DETERMINE TIMING ===
         timing = self._determine_timing(factors, zone_breach_pips)
@@ -301,6 +308,41 @@ class HybridHedgeIntelligence:
         except Exception as e:
             logger.debug(f"[CONSENSUS] Analysis failed: {e}")
             return 1.0
+
+    def _analyze_pressure(self, market_data: Dict, positions: List[Dict]) -> float:
+        """
+        Analyze tick pressure (Order Flow) impact on hedge.
+        
+        Logic:
+        - If Pressure matches Hedge Direction -> Confidence Boost (1.1x - 1.2x)
+        - If Pressure opposes Hedge Direction -> Caution (0.7x - 0.9x)
+        """
+        pressure = market_data.get('pressure_metrics', {})
+        if not pressure:
+            return 1.0
+            
+        intensity = pressure.get('intensity', 'LOW')
+        dominance = pressure.get('dominance', 'NEUTRAL')
+        
+        if intensity == 'LOW' or dominance == 'NEUTRAL':
+            return 1.0
+            
+        # Determine Hedge Direction (Opposite of Net Position)
+        net_lots = sum(p.get('volume', 0.0) if p.get('type') == 0 else -p.get('volume', 0.0) for p in positions)
+        hedge_direction = "SELL" if net_lots > 0 else "BUY"
+        
+        factor = 1.0
+        
+        if dominance == hedge_direction:
+            # Pressure supports our recovery trade
+            if intensity == 'HIGH': factor = 1.15
+            elif intensity == 'EXTREME': factor = 1.25
+        else:
+            # Pressure opposes our recovery trade (Fighting the flow)
+            if intensity == 'HIGH': factor = 0.85
+            elif intensity == 'EXTREME': factor = 0.70
+            
+        return factor
     
     def _calculate_base_hedge(self, positions: List[Dict], market_data: Dict) -> float:
         """
@@ -390,8 +432,9 @@ class HybridHedgeIntelligence:
             'volatility': 0.35,
             'support_resistance': 0.25,
             'time_decay': 0.20,
-            'oracle': 0.15,
-            'directional': 0.05
+            'oracle': 0.10,
+            'directional': 0.05,
+            'pressure': 0.05
         }
         
         # Confidence is how close factors are to 1.0 (neutral)

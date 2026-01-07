@@ -281,7 +281,7 @@ class RiskManager:
             return True, "Conditions met for hedging"
 
     def calculate_zone_parameters(self, positions: List[Dict], tick: Dict, point: float,
-                                ppo_guardian, nexus=None, atr_val: float = 0.0010) -> Tuple[float, float]:
+                                ppo_guardian, atr_val: float = 0.0010) -> Tuple[float, float]:
         """
         Calculate dynamic zone and TP parameters with AI enhancement.
         Implements SURVIVAL PROTOCOL (Exponential Grid).
@@ -330,8 +330,8 @@ class RiskManager:
 
     def execute_zone_recovery(self, broker, symbol: str, positions: List[Dict],
                             tick: Dict, point: float, shield, ppo_guardian,
-                            position_manager, strict_entry: bool, nexus=None, oracle=None, atr_val: float = None,
-                            volatility_ratio: float = 1.0, rsi_value: float = None) -> bool:
+                            position_manager, strict_entry: bool, oracle=None, atr_val: float = None,
+                            volatility_ratio: float = 1.0, rsi_value: float = None, trap_hunter=None, pressure_metrics=None) -> bool:
         """
         Execute zone recovery hedging if conditions are met.
         
@@ -350,6 +350,8 @@ class RiskManager:
             nexus: Optional NexusBrain instance
             atr_val: Current ATR value for dynamic calculations
             volatility_ratio: Ratio of current volatility to average (1.0 = normal)
+            trap_hunter: Optional TrapHunter instance for fakeout detection
+            pressure_metrics: Optional Tick Pressure Metrics for smart hedging
 
         Returns:
             True if hedge was executed
@@ -592,7 +594,7 @@ class RiskManager:
 
             # Calculate dynamic parameters (still needed for zone width tracking)
             zone_width_points, tp_width_points = self.calculate_zone_parameters(
-                positions, tick, point, ppo_guardian, nexus, atr_val=atr_val
+                positions, tick, point, ppo_guardian, atr_val=atr_val
             )
             
             # === INTELLIGENT VOLATILITY SCALING ===
@@ -827,6 +829,54 @@ class RiskManager:
                 logger.debug(f"[{symbol}] Already hedged with SELL (Last pos was SELL). Holding...")
                 return False
 
+            # === TRAP HUNTER VETO (Institutional Fakeout Protection) ===
+            # Before implementing the hedge, we check if we are falling into a trap.
+            # e.g. Trying to Sell Hedge into a "Bear Trap" (Fake breakdown).
+            if trap_hunter and next_action:
+                try:
+                    # Ensure we have candles for analysis
+                    analysis_candles = candles
+                    if not analysis_candles:
+                        # Fetch if missing (should adhere to cache rules)
+                        if hasattr(broker, 'get_candles'):
+                             analysis_candles = broker.get_candles(symbol, 60) # 1H context or M1? usually M1 for traps
+                    
+                    if analysis_candles:
+                        # 1. Update Trap Hunter with fresh data
+                        trap_signal = trap_hunter.scan(symbol, analysis_candles, tick)
+                        
+                        # 2. Check if our proposed action is unsafe
+                        # is_trap("SELL") checks if there is a fakeout regarding SELLs (e.g. Bear Trap)
+                        if trap_hunter.is_trap(next_action):
+                             # [SAFETY OVERRIDE] "Break the Glass"
+                             # If we are DEEP in the red (Zone Breach > 50 pips), we ignore the Trap Hunter.
+                             # Survival > Intelligence.
+                             current_breach = 0.0
+                             if next_action == "BUY":
+                                 current_breach = (target_price - upper_level) * pip_multiplier
+                             else:
+                                 current_breach = (lower_level - target_price) * pip_multiplier
+                                 
+                             # [HIGHEST INTELLIGENCE] DYNAMIC EMERGENCY THRESHOLD
+                             # Instead of fixed 50 pips, we use 3.0x Current ATR.
+                             # If Volatility is high, we give more room. If low, we tighten up.
+                             # Default fallback: 50.0 pips if ATR missing.
+                             
+                             dynamic_threshold = 500.0
+                             if atr_val and float(atr_val) > 0:
+                                 # ATP in points = ATR * Multiplier
+                                 # Threshold = 3.0 * ATR (A massive deviation)
+                                 dynamic_threshold = float(atr_val) * pip_multiplier * 3.0
+                             
+                             if current_breach > dynamic_threshold:
+                                 logger.critical(f"[{symbol}] 🚨 EMERGENCY OVERRIDE: Trap Veto IGNORED. Breach {current_breach:.1f}pts > Dynamic Limit {dynamic_threshold:.1f}pts (3x ATR).")
+                                 trap_signal = None # Disable signal (Force Hedge)
+                             else:
+                                 logger.warning(f"[{symbol}] [TRAP VETO] Hedge blocked! {next_action} identified as {trap_signal.trap_type}. Confidence: {trap_signal.confidence:.0%}")
+                                 return False
+                except Exception as e:
+                    logger.debug(f"[TRAP_CHECK] Failed: {e}")
+
             # === ELASTIC DEFENSE PROTOCOL INTEGRATION ===
             # If we are here, it means the old "Zone Logic" triggered.
             # BUT, we must check if the Elastic Defense Protocol agrees.
@@ -912,7 +962,8 @@ class RiskManager:
                 'trend_strength': 0.0,  # Would calculate from price action
                 'symbol': symbol,
                 'current_price': target_price,
-                'volatility_ratio': volatility_ratio
+                'volatility_ratio': volatility_ratio,
+                'pressure_metrics': pressure_metrics
             }
             
             # Calculate zone breach distance

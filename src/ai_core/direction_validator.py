@@ -50,26 +50,36 @@ class DirectionValidator:
         biases = {}
         
         try:
+            # [INTELLIGENCE FIX] Analyze Trend & Regime FIRST to establish context
+            # We need to know if we are Trending or Ranging to interpret Momentum/Levels correctly.
             biases['trend'] = self._analyze_trend(market_data)
-            biases['momentum'] = self._analyze_momentum(market_data)
-            biases['levels'] = self._analyze_levels(market_data)
+            trend_score = biases['trend']
+            
+            # Extract Regime Name safely
+            regime_obj = market_data.get('regime', 'RANGE')
+            regime_name = regime_obj.name if hasattr(regime_obj, 'name') else str(regime_obj)
+            regime_name = regime_name.upper()
+
+            # Pass context to other analyzers
+            biases['momentum'] = self._analyze_momentum(market_data, regime_name, trend_score)
+            biases['levels'] = self._analyze_levels(market_data, regime_name, trend_score)
             biases['mtf'] = self._analyze_mtf(market_data)
             biases['flow'] = self._analyze_flow(market_data)
             biases['ai'] = self._analyze_ai(direction, market_data)
             biases['trajectory'] = self._analyze_trajectory(market_data)
         except Exception as e:
-            logger.error(f"[ANALYST] Analysis failed: {e}")
+            logger.error(f"[ANALYST] Analysis failed: {e}", exc_info=True)
             return ValidationResult(0.5, 1.0, False, 0, 0, [], "Analysis Error (Defaulting to Neutral)")
 
-        # 2. Apply Weights (optimized for SCALPING)
+        # 2. Apply "Council of Minds" Weights (Physics & Flow Priority)
         weights = {
-            'trajectory': 0.20,
-            'trend': 0.20,
-            'momentum': 0.15,
-            'ai': 0.15,
-            'levels': 0.15,
-            'mtf': 0.10,
-            'flow': 0.05
+            'trajectory': 0.25, # High Priority: Physics (Next 5 candles)
+            'flow': 0.15,       # High Priority: Micro-Structure (Order Flow)
+            'trend': 0.15,      # Medium: Context
+            'levels': 0.15,     # Medium: Structure
+            'momentum': 0.10,   # Low: Lagging
+            'ai': 0.10,         # Low: Oracle Class Label (Trajectory is better)
+            'mtf': 0.10         # Low: Confirmation
         }
         
         total_bias = 0.0
@@ -90,22 +100,21 @@ class DirectionValidator:
         market_bias = total_bias / total_weight if total_weight > 0 else 0.0
 
         # [INTELLIGENCE] Strict Trend Guard: Prevent fighting strong trends
-        trend_bias = biases.get('trend', 0.0)
-        rsi_val = float(market_data.get('rsi', 50.0))
-        guard_penalty = 0.0
+        # Only applies in RANGE or UNKNOWN regimes where we might mistakenly fade a new trend.
+        # If we are ALREADY in TREND regime, the analytics above handle it.
         
-        # Guard against Selling in Strong Uptrend
-        if trend_bias > 0.6 and direction == "SELL":
-            if rsi_val < 80: # Unless extremely overbought
-                market_bias += 0.5 # Push bias towards BUY (opposing the SELL signal)
-                guard_penalty = 1.0
+        rsi_val = float(market_data.get('rsi', 50.0))
+        
+        # Guard against Selling in Strong Uptrend (if analytics missed it)
+        if trend_score > 0.6 and direction == "SELL" and regime_name != "TREND":
+            if rsi_val < 80: 
+                market_bias += 0.5 
                 details.append(f"TREND_GUARD: BLOCKED SELL (Uptrend+RSI{rsi_val:.1f})")
 
         # Guard against Buying in Strong Downtrend
-        if trend_bias < -0.6 and direction == "BUY":
-            if rsi_val > 20: # Unless extremely oversold
-                market_bias -= 0.5 # Push bias towards SELL (opposing the BUY signal)
-                guard_penalty = 1.0
+        if trend_score < -0.6 and direction == "BUY" and regime_name != "TREND":
+            if rsi_val > 20: 
+                market_bias -= 0.5 
                 details.append(f"TREND_GUARD: BLOCKED BUY (Downtrend+RSI{rsi_val:.1f})")
 
         
@@ -136,13 +145,31 @@ class DirectionValidator:
             confidence_multiplier = 0.5
             narrative = f"CRITICAL DIVERGENCE! Market strongly opposes {direction}. Suggest INVERSION."
 
+        # [COUNCIL OF MINDS] ABSOLUTE VETO POWERS
+        # If Physics (Trajectory) or Flow (Pressure) strongly oppose, we BLOCK.
+        # This overrides the "Invert" suggestion because inverting into a Chop is bad.
+        
+        # Check Trajectory Veto
+        traj_bias = biases.get('trajectory', 0.0)
+        if (direction == "BUY" and traj_bias < -0.5) or (direction == "SELL" and traj_bias > 0.5):
+            confidence_multiplier = 0.0 # Strict Block
+            narrative = f"[COUNCIL VETO] Physics Veto. Trajectory predicts opposite move ({traj_bias:.2f})."
+            should_invert = False # Don't invert, just BLOCK
+
+        # Check Flow Veto
+        flow_bias = biases.get('flow', 0.0)
+        if (direction == "BUY" and flow_bias < -0.6) or (direction == "SELL" and flow_bias > 0.6):
+             confidence_multiplier = 0.0 # Strict Block
+             narrative = f"[COUNCIL VETO] Flow Veto. Order Flow strongly opposes ({flow_bias:.2f})."
+             should_invert = False
+
         return ValidationResult(
             score=score,
             confidence_multiplier=confidence_multiplier,
             should_invert=should_invert,
             passed_factors=len(supporting_factors),
             total_factors=len(weights),
-            failed_factors=opposing_factors, # Meaningful "Opposing" list
+            failed_factors=opposing_factors, 
             reasoning=narrative
         )
 
@@ -151,25 +178,47 @@ class DirectionValidator:
     def _analyze_trend(self, market_data: Dict) -> float:
         """Analyze Trend Direction and Strength."""
         trend_str = str(market_data.get('trend', 'NEUTRAL')).upper()
-        regime = str(market_data.get('regime', '')).upper()
+        regime_obj = market_data.get('regime', '')
+        regime_name = regime_obj.name if hasattr(regime_obj, 'name') else str(regime_obj)
+        regime_name = regime_name.upper()
         
         score = 0.0
-        if 'UP' in regime or 'BULL' in trend_str: score += 0.8
-        elif 'DOWN' in regime or 'BEAR' in trend_str: score -= 0.8
+        if 'UP' in regime_name or 'BULL' in trend_str: score += 0.8
+        elif 'DOWN' in regime_name or 'BEAR' in trend_str: score -= 0.8
         
         return score
 
-    def _analyze_momentum(self, market_data: Dict) -> float:
-        """Analyze Momentum (RSI + MACD)."""
+    def _analyze_momentum(self, market_data: Dict, regime_name: str, trend_score: float) -> float:
+        """
+        Analyze Momentum (RSI + MACD).
+        Context-Aware: Interprets RSI differently in Trends vs Ranges.
+        """
         rsi = market_data.get('rsi', 50)
         macd = market_data.get('macd', {})
         score = 0.0
         
-        # RSI
-        if rsi > 70: score -= 0.8 # Overbought -> Bearish Pressure
-        elif rsi < 30: score += 0.8 # Oversold -> Bullish Pressure
-        elif rsi > 55: score += 0.3 # Mild Bullish
-        elif rsi < 45: score -= 0.3 # Mild Bearish
+        # RSI Logic
+        if "TREND" in regime_name and abs(trend_score) > 0.4:
+            # TREND REGIME: Extremes confirm strength (Momentum)
+            if rsi > 70 and trend_score > 0: 
+                score += 0.5 # Bullish Momentum (don't fade!)
+            elif rsi < 30 and trend_score < 0: 
+                score -= 0.5 # Bearish Momentum (don't fade!)
+            elif rsi > 80: # Extreme Overbought -> Warning even in trend
+                score -= 0.2 
+            elif rsi < 20: # Extreme Oversold -> Warning even in trend
+                score += 0.2
+            else:
+                # Normal RSI in trend check
+                if rsi > 55: score += 0.2
+                elif rsi < 45: score -= 0.2
+                
+        else:
+            # RANGE/UNKNOWN REGIME: Mean Reversion
+            if rsi > 70: score -= 0.8 # Overbought -> Bearish Pressure
+            elif rsi < 30: score += 0.8 # Oversold -> Bullish Pressure
+            elif rsi > 55: score += 0.3 # Mild Bullish
+            elif rsi < 45: score -= 0.3 # Mild Bearish
         
         # MACD
         hist = macd.get('histogram', 0)
@@ -178,8 +227,11 @@ class DirectionValidator:
         
         return max(-1.0, min(1.0, score))
 
-    def _analyze_levels(self, market_data: Dict) -> float:
-        """Analyze proximity to Support/Resistance."""
+    def _analyze_levels(self, market_data: Dict, regime_name: str, trend_score: float) -> float:
+        """
+        Analyze proximity to Support/Resistance.
+        Context-Aware: Trends break levels; Ranges respect them.
+        """
         price = market_data.get('current_price', 0)
         if not price: return 0.0
         
@@ -191,17 +243,26 @@ class DirectionValidator:
         total = dist_supp + dist_res
         if total == 0: return 0.0
         
-        # If closer to support -> Bullish Bounce (+1)
-        # If closer to resistance -> Bearish Rejection (-1)
+        # Base Proximity Score (-1 at Res, +1 at Sup)
+        proximity = (dist_res - dist_supp) / total
         
-        # Normalize position: -1 (at res) to +1 (at sup)
-        # Ratio of distance
-        # proximity = (dist_res - dist_supp) / total
-        
-        # Example: Price 105, Supp 100, Res 110. D_S=5, D_R=5. Total=10. (5-5)/10 = 0. Neutral.
-        # Example: Price 101, Supp 100, Res 110. D_S=1, D_R=9. Total=10. (9-1)/10 = 0.8. Bullish.
-        
-        return (dist_res - dist_supp) / total
+        # Context Adjustment
+        if "TREND" in regime_name and abs(trend_score) > 0.5:
+            # TREND REGIME: Levels are meant to be broken
+            if trend_score > 0: # Uptrend
+                # If at Resistance (proximity -> -1), ignore it or treat as breakout
+                if proximity < -0.5: return 0.2 # Breakout potential
+                if proximity > 0.5: return 0.8 # Support hold in uptrend is good
+            else: # Downtrend
+                # If at Support (proximity -> +1), ignore it or treat as breakdown
+                if proximity > 0.5: return -0.2 # Breakdown potential
+                if proximity < -0.5: return -0.8 # Resistance hold in downtrend is good
+                
+            return proximity * 0.5 # Weaken level respect in trends
+            
+        else:
+            # RANGE REGIME: Respect Levels (Mean Reversion)
+            return proximity
 
     def _analyze_mtf(self, market_data: Dict) -> float:
         """Analyze Multi-Timeframe Alignment."""
@@ -234,18 +295,36 @@ class DirectionValidator:
         end_price = traj[-1]
         pct_change = (end_price - current_price) / current_price if current_price > 0 else 0
         
-        if abs(pct_change) < 0.001:
+        if abs(pct_change) < 0.0002: # Ignore < 0.02% noise (approx $0.50 on Gold)
             return 0.0
-        elif pct_change > 0.005:
+        elif pct_change > 0.001: # > 0.1% move (approx $2.50) is Strong Bullish
             return 1.0
-        elif pct_change < -0.005:
+        elif pct_change < -0.001: # < -0.1% move (approx -$2.50) is Strong Bearish
             return -1.0
         else:
-            return max(-1.0, min(1.0, pct_change * 200))
+            # Scale linearly: 0.0002 to 0.001 maps to Score 0.2 to 1.0
+            # factor = 1000? 0.001 * 1000 = 1.0
+            return max(-1.0, min(1.0, pct_change * 1000))
 
     def _analyze_flow(self, market_data: Dict) -> float:
-        """Order flow analysis - currently neutral."""
-        return 0.0
+        """
+        Analyze Order Flow / Tick Pressure.
+        Returns: -1.0 (Bearish Pressure) to 1.0 (Bullish Pressure)
+        """
+        pressure = market_data.get('pressure', {})
+        if not pressure: return 0.0
+        
+        dominance = pressure.get('dominance', 'NEUTRAL')
+        intensity = pressure.get('intensity', 'LOW')
+        
+        score = 0.0
+        if dominance == 'BUY': score = 0.5
+        elif dominance == 'SELL': score = -0.5
+        
+        if intensity == 'HIGH': score *= 1.5
+        elif intensity == 'EXTREME': score *= 2.0
+        
+        return max(-1.0, min(1.0, score))
 
 # Singleton instance
 _validator_instance = None

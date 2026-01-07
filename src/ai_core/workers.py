@@ -65,9 +65,16 @@ class RangeWorker(BaseWorker):
                     confidence -= 0.2
                     reason += " - High Buy Pressure"
                     
-        # Boost confidence to ensure trade execution (unless penalized)
+        # Boost confidence to ensure trade execution (unless penalized by High Intensity Pressure)
         if action != "HOLD":
-            confidence = max(0.6, confidence) # Minimum 0.6 to trigger
+            # [CRITICAL FIX] Do not forcefully boost confidence if there is a High Pressure Warning
+            # "High Buy Pressure" means Breakout Risk -> Don't fade it blindly.
+            if "High" in reason and "-" in reason and "Pressure" in reason:
+                # We have a specific warning like "- High Buy Pressure"
+                # Don't boost. Let it fail if confidence is low.
+                pass 
+            else:
+                confidence = max(0.6, confidence) # Minimum 0.6 to trigger normal trades
 
         # Safety clamp
         confidence = max(0.0, min(1.0, confidence))

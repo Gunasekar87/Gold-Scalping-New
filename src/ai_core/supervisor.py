@@ -54,6 +54,17 @@ class Supervisor:
                 macro_context = [0.0, 0.0]
             usd_velocity = abs(float(macro_context[0] or 0.0))
             
+            # [HIGHEST INTELLIGENCE] Pressure-Based Regime Override
+            # If Tick Pressure is HIGH, we are likely breaking out.
+            # We override "CHAOS" (Defensive) with "TREND" (Aggressive) to capture the move.
+            pressure = market_data.get('pressure_metrics', {})
+            if pressure:
+                intensity = pressure.get('intensity', 'LOW')
+                dominance = pressure.get('dominance', 'NEUTRAL')
+                
+                if intensity in ("HIGH", "EXTREME") and dominance in ("BUY", "SELL"):
+                    return Regime("TREND", 0.9, f"High Pressure Breakout ({dominance})")
+
             # Classification Logic
             if volatility_ratio > 2.5 or usd_velocity > 5.0:
                 return Regime("CHAOS", 1.0, "Extreme Volatility / News Event")
