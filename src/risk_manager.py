@@ -832,128 +832,129 @@ class RiskManager:
             calc_zone_points = zone_width_points / point
             calc_tp_points = tp_width_points / point
 
-            # Use Stored Plan Lots if available, otherwise calculate dynamically
-            if use_stored_plan and stored_lots > 0:
-                hedge_lot = stored_lots
-                logger.info(f"[PLAN] Using stored hedge lots: {hedge_lot}")
+            # Initialize hedge_decision to None to ensure it's in scope
+            hedge_decision = None
+            
+            # ALWAYS run Hybrid Intelligence for decision quality
+            # Even if using stored plan, we need the intelligence analysis
+            
+            # Get Oracle prediction if available
+            oracle_pred = "NEUTRAL"
+            if oracle:
+                try:
+                    # Avoid fetching candles here; use cached/last-known prediction if present.
+                    raw = None
+                    if hasattr(oracle, "last_prediction"):
+                        raw = getattr(oracle, "last_prediction")
+                    elif hasattr(oracle, "last_signal"):
+                        raw = getattr(oracle, "last_signal")
+
+                    if raw is not None:
+                        raw_s = str(raw).strip().upper()
+                        if raw_s in ("UP", "BUY"):
+                            oracle_pred = "BUY"
+                        elif raw_s in ("DOWN", "SELL"):
+                            oracle_pred = "SELL"
+                        elif raw_s == "NEUTRAL":
+                            oracle_pred = "NEUTRAL"
+                except Exception as e:
+                    logger.debug(f"[HEDGE] Oracle prediction unavailable: {e}")
+            
+            # === HYBRID HEDGE INTELLIGENCE ===
+            # Use comprehensive analysis combining proven methods + AI
+            from src.ai_core.hybrid_hedge_intelligence import HybridHedgeIntelligence
+            
+            hybrid_intel = HybridHedgeIntelligence()
+            
+            # Prepare market data for analysis
+            hedge_market_data = {
+                'atr': atr_val,
+                'rsi': rsi_value,
+                'trend_strength': 0.0,  # Would calculate from price action
+                'symbol': symbol,
+                'current_price': target_price,
+                'volatility_ratio': volatility_ratio
+            }
+            
+            # Calculate zone breach distance
+            zone_breach_pips = 0.0
+            if next_action == "BUY":
+                zone_breach_pips = (target_price - upper_level) * pip_multiplier
             else:
-                # Get Oracle prediction if available
-                oracle_pred = "NEUTRAL"
-                if oracle:
-                    try:
-                        # Avoid fetching candles here; use cached/last-known prediction if present.
-                        raw = None
-                        if hasattr(oracle, "last_prediction"):
-                            raw = getattr(oracle, "last_prediction")
-                        elif hasattr(oracle, "last_signal"):
-                            raw = getattr(oracle, "last_signal")
-
-                        if raw is not None:
-                            raw_s = str(raw).strip().upper()
-                            if raw_s in ("UP", "BUY"):
-                                oracle_pred = "BUY"
-                            elif raw_s in ("DOWN", "SELL"):
-                                oracle_pred = "SELL"
-                            elif raw_s == "NEUTRAL":
-                                oracle_pred = "NEUTRAL"
-                    except Exception as e:
-                        logger.debug(f"[HEDGE] Oracle prediction unavailable: {e}")
-                
-                # === HYBRID HEDGE INTELLIGENCE ===
-                # Use comprehensive analysis combining proven methods + AI
-                from src.ai_core.hybrid_hedge_intelligence import HybridHedgeIntelligence
-                
-                hybrid_intel = HybridHedgeIntelligence()
-                
-                # Prepare market data for analysis
-                hedge_market_data = {
-                    'atr': atr_val,
-                    'rsi': rsi_value,
-                    'trend_strength': 0.0,  # Would calculate from price action
-                    'symbol': symbol,
-                    'current_price': target_price,
-                    'volatility_ratio': volatility_ratio
-                }
-                
-                # Calculate zone breach distance
-                zone_breach_pips = 0.0
-                if next_action == "BUY":
-                    zone_breach_pips = (target_price - upper_level) * pip_multiplier
-                else:
-                    zone_breach_pips = (lower_level - target_price) * pip_multiplier
-                
-                # Get hybrid intelligence decision
-                hedge_decision = hybrid_intel.analyze_hedge_decision(
-                    positions=positions,
-                    current_price=target_price,
-                    market_data=hedge_market_data,
-                    oracle=oracle,
-                    zone_breach_pips=zone_breach_pips
+                zone_breach_pips = (lower_level - target_price) * pip_multiplier
+            
+            # Get hybrid intelligence decision
+            hedge_decision = hybrid_intel.analyze_hedge_decision(
+                positions=positions,
+                current_price=target_price,
+                market_data=hedge_market_data,
+                oracle=oracle,
+                zone_breach_pips=zone_breach_pips
+            )
+            
+            # Log comprehensive decision
+            logger.info(f"[HYBRID_HEDGE] ═══════════════════════════════════════════")
+            logger.info(f"[HYBRID_HEDGE] INTELLIGENT HEDGE ANALYSIS")
+            logger.info(f"[HYBRID_HEDGE] ═══════════════════════════════════════════")
+            logger.info(f"[HYBRID_HEDGE] Decision: {'HEDGE' if hedge_decision.should_hedge else 'SKIP'}")
+            logger.info(f"[HYBRID_HEDGE] Confidence: {hedge_decision.confidence:.0%}")
+            logger.info(f"[HYBRID_HEDGE] Timing: {hedge_decision.timing}")
+            logger.info(f"[HYBRID_HEDGE] Factors:")
+            for factor_name, factor_value in hedge_decision.factors.items():
+                adjustment = (factor_value - 1.0) * 100
+                logger.info(f"[HYBRID_HEDGE]   {factor_name.title()}: {factor_value:.3f} ({adjustment:+.1f}%)")
+            logger.info(f"[HYBRID_HEDGE] Reasoning: {hedge_decision.reasoning}")
+            logger.info(f"[HYBRID_HEDGE] ═══════════════════════════════════════════")
+            
+            # Check if we should delay hedge
+            if hedge_decision.timing.startswith("DELAY"):
+                logger.info(f"[HYBRID_HEDGE] Delaying hedge based on analysis. Will retry next cycle.")
+                return False
+            
+            # Check if we should skip hedge
+            if not hedge_decision.should_hedge:
+                logger.info(f"[HYBRID_HEDGE] Skipping hedge based on analysis.")
+                return False
+            
+            # Use hybrid intelligence hedge size
+            total_required_hedge = hedge_decision.hedge_size
+            
+            # Fallback: If hybrid returns too small, use IronShield as backup
+            if total_required_hedge < 0.01:
+                logger.warning(f"[HYBRID_HEDGE] Size too small ({total_required_hedge:.3f}), using IronShield fallback")
+                total_required_hedge = shield.calculate_defense(
+                    exposure_to_hedge,
+                    spread_points,
+                    fixed_zone_points=calc_zone_points,
+                    fixed_tp_points=calc_tp_points,
+                    oracle_prediction=oracle_pred,
+                    volatility_ratio=volatility_ratio,
+                    hedge_level=hedge_level,
+                    rsi_value=rsi_value
                 )
-                
-                # Log comprehensive decision
-                logger.info(f"[HYBRID_HEDGE] ═══════════════════════════════════════════")
-                logger.info(f"[HYBRID_HEDGE] INTELLIGENT HEDGE ANALYSIS")
-                logger.info(f"[HYBRID_HEDGE] ═══════════════════════════════════════════")
-                logger.info(f"[HYBRID_HEDGE] Decision: {'HEDGE' if hedge_decision.should_hedge else 'SKIP'}")
-                logger.info(f"[HYBRID_HEDGE] Confidence: {hedge_decision.confidence:.0%}")
-                logger.info(f"[HYBRID_HEDGE] Timing: {hedge_decision.timing}")
-                logger.info(f"[HYBRID_HEDGE] Factors:")
-                for factor_name, factor_value in hedge_decision.factors.items():
-                    adjustment = (factor_value - 1.0) * 100
-                    logger.info(f"[HYBRID_HEDGE]   {factor_name.title()}: {factor_value:.3f} ({adjustment:+.1f}%)")
-                logger.info(f"[HYBRID_HEDGE] Reasoning: {hedge_decision.reasoning}")
-                logger.info(f"[HYBRID_HEDGE] ═══════════════════════════════════════════")
-                
-                # Check if we should delay hedge
-                if hedge_decision.timing.startswith("DELAY"):
-                    logger.info(f"[HYBRID_HEDGE] Delaying hedge based on analysis. Will retry next cycle.")
-                    return False
-                
-                # Check if we should skip hedge
-                if not hedge_decision.should_hedge:
-                    logger.info(f"[HYBRID_HEDGE] Skipping hedge based on analysis.")
-                    return False
-                
-                # Use hybrid intelligence hedge size
-                total_required_hedge = hedge_decision.hedge_size
-                
-                # Fallback: If hybrid returns too small, use IronShield as backup
-                if total_required_hedge < 0.01:
-                    logger.warning(f"[HYBRID_HEDGE] Size too small ({total_required_hedge:.3f}), using IronShield fallback")
-                    total_required_hedge = shield.calculate_defense(
-                        exposure_to_hedge,
-                        spread_points,
-                        fixed_zone_points=calc_zone_points,
-                        fixed_tp_points=calc_tp_points,
-                        oracle_prediction=oracle_pred,
-                        volatility_ratio=volatility_ratio,
-                        hedge_level=hedge_level,
-                        rsi_value=rsi_value
-                    )
 
-                # [CRITICAL LOGIC FIX] Prevent Redundant Stacking
-                # We must subtract the volume of hedges we ALREADY have.
-                # If we need 0.14 lots total, and we have 0.15, we do NOTHING.
-                
-                current_friendly_volume = 0.0
-                target_type_id = 0 if next_action == "BUY" else 1  # 0=Buy, 1=Sell
-                
-                for p in positions:
-                    if p.get('type') == target_type_id:
-                        current_friendly_volume += p.get('volume', 0.0)
+            # [CRITICAL LOGIC FIX] Prevent Redundant Stacking
+            # We must subtract the volume of hedges we ALREADY have.
+            # If we need 0.14 lots total, and we have 0.15, we do NOTHING.
+            
+            current_friendly_volume = 0.0
+            target_type_id = 0 if next_action == "BUY" else 1  # 0=Buy, 1=Sell
+            
+            for p in positions:
+                if p.get('type') == target_type_id:
+                    current_friendly_volume += p.get('volume', 0.0)
 
-                logger.info(f"[HEDGE_CALC] Total Required: {total_required_hedge:.3f} | Existing Friendly: {current_friendly_volume:.3f} | Opposing Risk: {exposure_to_hedge:.3f}")
+            logger.info(f"[HEDGE_CALC] Total Required: {total_required_hedge:.3f} | Existing Friendly: {current_friendly_volume:.3f} | Opposing Risk: {exposure_to_hedge:.3f}")
 
-                # Calculate what is actually missing
-                hedge_lot = total_required_hedge - current_friendly_volume
-                
-                if hedge_lot < 0.01:
-                    logger.info(f"[HEDGE] Existing friendly volume ({current_friendly_volume:.3f}) is sufficient for defense (Target: {total_required_hedge:.3f}). Holding.")
-                    return True  # logic "handled" successfully by doing nothing
-                
-                # If we need more, we take the delta
-                logger.info(f"[HEDGE] Adjusting hedge size: Need {total_required_hedge:.3f} - Have {current_friendly_volume:.3f} = Placing {hedge_lot:.3f}")
+            # Calculate what is actually missing
+            hedge_lot = total_required_hedge - current_friendly_volume
+            
+            if hedge_lot < 0.01:
+                logger.info(f"[HEDGE] Existing friendly volume ({current_friendly_volume:.3f}) is sufficient for defense (Target: {total_required_hedge:.3f}). Holding.")
+                return True  # logic "handled" successfully by doing nothing
+            
+            # If we need more, we take the delta
+            logger.info(f"[HEDGE] Adjusting hedge size: Need {total_required_hedge:.3f} - Have {current_friendly_volume:.3f} = Placing {hedge_lot:.3f}")
 
             # === EQUITY CHECK BEFORE EXECUTION ===
             account_info = broker.get_account_info()
@@ -1156,7 +1157,7 @@ class RiskManager:
             dashboard = get_dashboard()
             
             # Determine hedge reason - show Hybrid Intelligence summary
-            if 'hedge_decision' in locals() and hedge_decision:
+            if hedge_decision is not None:
                 # Use Hybrid Intelligence reasoning
                 hedge_reason = f"Hybrid AI ({hedge_decision.confidence:.0%} confidence)"
                 # Add key factors that influenced the decision
@@ -1182,8 +1183,8 @@ class RiskManager:
                 trade_type="HEDGE"
             )
             
-            # CRITICAL: Ensure hedge is visible in terminal (bypass logger config)
-            print(f"🛡️ HEDGE: {next_action} {hedge_lot:.2f} @ {target_price:.2f} - {hedge_reason}", flush=True)
+            # Note: Hedge already logged by dashboard.trade_entry() above
+            # Removed duplicate print() to fix double logging issue
 
             # Remove TP/SL from additional positions (for hedges beyond the first)
             # First hedge TP/SL already removed above in atomic transition
