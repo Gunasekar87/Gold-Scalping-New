@@ -1302,6 +1302,7 @@ class TradingEngine:
                     h2_dir = "BUY"
                     
                     # Hedge 3 (Sell): H1 - Smart Buffer (Expansion)
+                    # For BUY Initial: H1=SELL, H2=BUY. H3 should be SELL (Recover H2)
                     hedge3_price = hedge1_price - smart_buffer_dist
                     h3_dir = "SELL"
                     

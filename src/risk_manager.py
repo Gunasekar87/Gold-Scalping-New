@@ -659,24 +659,30 @@ class RiskManager:
             
             # OVERRIDE with Stored Plan if available
             if use_stored_plan and stored_trigger_price > 0:
-                if first_pos['type'] == 0: # BUY
-                    # Hedge 1 (SELL) is below entry. Hedge 2 (BUY) is at entry.
-                    if hedge_level == 1:
-                        lower_level = stored_trigger_price
-                    elif hedge_level == 2:
-                        upper_level = stored_trigger_price
-                    elif hedge_level == 3:
-                        lower_level = stored_trigger_price
-                else: # SELL
-                    # Hedge 1 (BUY) is above entry. Hedge 2 (SELL) is at entry.
-                    if hedge_level == 1:
-                        upper_level = stored_trigger_price
-                    elif hedge_level == 2:
-                        lower_level = stored_trigger_price
-                    elif hedge_level == 3:
-                        upper_level = stored_trigger_price
+                # [FIX] Assign correct zone boundary based on hedge level and direction
+                # Standard Zone Recovery Zig-Zag:
+                # BUY Initial: H1(Sell/Low) -> H2(Buy/High) -> H3(Sell/Low) -> H4(Buy/High)
+                # SELL Initial: H1(Buy/High) -> H2(Sell/Low) -> H3(Buy/High) -> H4(Sell/Low)
                 
-                logger.info(f"[PLAN] Overriding dynamic zone with PLAN: Lower={lower_level:.5f}, Upper={upper_level:.5f}")
+                if first_pos['type'] == 0: # BUY Initial
+                    if hedge_level % 2 != 0: # Odd levels (1, 3, 5): SELL (Lower Zone)
+                        lower_level = stored_trigger_price
+                        # Ensure we don't accidentally set upper_level to something that triggers immediate buy
+                        # If we are looking for lower breach, upper should be safety distance away
+                        if upper_level == 0: upper_level = stored_trigger_price + (2 * self.config.zone_pips * point)
+                    else: # Even levels (2, 4, 6): BUY (Upper Zone)
+                        upper_level = stored_trigger_price
+                        if lower_level == 0: lower_level = stored_trigger_price - (2 * self.config.zone_pips * point)
+                        
+                else: # SELL Initial
+                    if hedge_level % 2 != 0: # Odd levels (1, 3, 5): BUY (Upper Zone)
+                        upper_level = stored_trigger_price
+                        if lower_level == 0: lower_level = stored_trigger_price - (2 * self.config.zone_pips * point)
+                    else: # Even levels (2, 4, 6): SELL (Lower Zone)
+                        lower_level = stored_trigger_price
+                        if upper_level == 0: upper_level = stored_trigger_price + (2 * self.config.zone_pips * point)
+
+                logger.info(f"[{symbol}] Plan Override: Hedge Level {hedge_level} -> Set {'Upper' if (upper_level == stored_trigger_price) else 'Lower'} = {stored_trigger_price}")
 
             # Update state (for PPO learning)
             with state.lock:
@@ -706,33 +712,51 @@ class RiskManager:
             # Here we use a small epsilon for robustness
             epsilon = point * 0.1
 
+            # [FIX] Added validation to ensure we don't place same direction hedge twice in a row
+            # unless it's a specific strategy decision (which we log)
+            
             if tick['bid'] <= lower_level + epsilon:
                 # Price below lower zone boundary
-                if first_pos['type'] == 0:  # Initial was BUY, hedge with SELL (Loss Side)
+                if first_pos['type'] == 0:  # Initial was BUY
                     next_action = "SELL"
                     target_price = tick['bid']
                     logger.info(f"[{symbol}] TRIGGER: Price below zone ({tick['bid']:.{precision}f} <= {lower_level:.{precision}f}), hedge with SELL")
-                elif first_pos['type'] == 1 and len(positions) > 1: 
-                    # Initial was SELL. Price dropped below Entry (Profit Side).
-                    # If we are hedged (len > 1), this means we have a BUY hedge (Hedge 1) that is now losing.
-                    # We need to add to our SELL position (Hedge 2/4) to recover.
-                    next_action = "SELL"
-                    target_price = tick['bid']
-                    logger.info(f"[{symbol}] TRIGGER: Price below zone (Profit Side but Hedged), hedge with SELL (Recovery)")
+                elif first_pos['type'] == 1 and len(positions) > 1:
+                    # Initial was SELL. Price dropped below Entry.
+                    # If we have hedges, we might need to add to SELL to recover BUY hedge.
+                    # ONLY if this is an EVEN hedge level (2, 4, 6)
+                    # If this is ODD hedge level (1, 3), we should NOT be here (Upper zone breach expected)
+                    
+                    if len(positions) % 2 != 0: 
+                        # Odd positions (e.g. 1). We are looking for H1 (Buy/Upper). 
+                        # Price dropping is GOOD (Profit). Don't hedge.
+                        pass
+                    else:
+                        # Even positions (e.g. 2: Sell, Buy). We are looking for H2 (Sell/Lower).
+                        next_action = "SELL"
+                        target_price = tick['bid']
+                        logger.info(f"[{symbol}] TRIGGER: Price below zone ({tick['bid']:.{precision}f} <= {lower_level:.{precision}f}), Recovery Hedge SELL")
 
             elif tick['ask'] >= upper_level - epsilon:
                 # Price above upper zone boundary
-                if first_pos['type'] == 1:  # Initial was SELL, hedge with BUY (Loss Side)
+                if first_pos['type'] == 1:  # Initial was SELL
                     next_action = "BUY"
                     target_price = tick['ask']
                     logger.info(f"[{symbol}] TRIGGER: Price above zone ({tick['ask']:.{precision}f} >= {upper_level:.{precision}f}), hedge with BUY")
                 elif first_pos['type'] == 0 and len(positions) > 1:
-                    # Initial was BUY. Price rose above Entry (Profit Side).
-                    # If we are hedged (len > 1), this means we have a SELL hedge (Hedge 1) that is now losing.
-                    # We need to add to our BUY position (Hedge 2/4) to recover.
-                    next_action = "BUY"
-                    target_price = tick['ask']
-                    logger.info(f"[{symbol}] TRIGGER: Price above zone (Profit Side but Hedged), hedge with BUY (Recovery)")
+                    # Initial was BUY. Price rose above Entry.
+                    # If we have hedges, we might need to add to BUY to recover SELL hedge.
+                    # ONLY if this is an EVEN hedge level (2, 4, 6)
+                    
+                    if len(positions) % 2 != 0:
+                        # Odd positions (e.g. 1). We are looking for H1 (Sell/Lower).
+                        # Price rising is GOOD (Profit). Don't hedge.
+                        pass
+                    else:
+                        # Even positions (e.g. 2: Buy, Sell). We are looking for H2 (Buy/Upper).
+                        next_action = "BUY"
+                        target_price = tick['ask']
+                        logger.info(f"[{symbol}] TRIGGER: Price above zone ({tick['ask']:.{precision}f} >= {upper_level:.{precision}f}), Recovery Hedge BUY")
             
             # DEBUG: Explicitly log why trigger failed if close
             if not next_action:
