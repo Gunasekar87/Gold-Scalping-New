@@ -123,11 +123,6 @@ class BucketStats:
     exit_reason: str = ""  # Exit criteria that triggered close
     exit_confidence: float = 0.0  # AI confidence at exit trigger
     last_recovery_time: float = 0.0  # Last time calculated recovery was executed
-    # [STATE PERSISTENCE FIX] Zone boundaries for restart recovery
-    upper_level: float = 0.0  # Upper zone boundary
-    lower_level: float = 0.0  # Lower zone boundary
-    entry_price: float = 0.0  # Original entry price
-    zone_atr: float = 0.0  # ATR used for zone calculation
 
 
 class PositionManager:
@@ -290,11 +285,6 @@ class PositionManager:
                 stats_data.setdefault('last_state_check', time.time())
                 stats_data.setdefault('exit_reason', '')
                 stats_data.setdefault('last_recovery_time', 0.0)
-                # [STATE PERSISTENCE FIX] Restore zone boundaries
-                stats_data.setdefault('upper_level', 0.0)
-                stats_data.setdefault('lower_level', 0.0)
-                stats_data.setdefault('entry_price', 0.0)
-                stats_data.setdefault('zone_atr', 0.0)
                 
                 self.bucket_stats[bucket_id] = BucketStats(**stats_data)
 
@@ -349,12 +339,7 @@ class PositionManager:
                         'mode': stats.mode.value if hasattr(stats, 'mode') else BucketMode.SINGLE.value,
                         'last_state_check': getattr(stats, 'last_state_check', time.time()),
                         'exit_reason': getattr(stats, 'exit_reason', ''),
-                        'last_recovery_time': getattr(stats, 'last_recovery_time', 0.0),
-                        # [STATE PERSISTENCE FIX] Save zone boundaries
-                        'upper_level': getattr(stats, 'upper_level', 0.0),
-                        'lower_level': getattr(stats, 'lower_level', 0.0),
-                        'entry_price': getattr(stats, 'entry_price', 0.0),
-                        'zone_atr': getattr(stats, 'zone_atr', 0.0)
+                        'last_recovery_time': getattr(stats, 'last_recovery_time', 0.0)
                     }
                     for bid, stats in self.bucket_stats.items()
                 },
