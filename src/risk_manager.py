@@ -347,7 +347,7 @@ class RiskManager:
             shield: IronShield instance for volume calculation
             ppo_guardian: PPO Guardian instance
             position_manager: PositionManager instance for state persistence
-            nexus: Optional NexusBrain instance
+
             atr_val: Current ATR value for dynamic calculations
             volatility_ratio: Ratio of current volatility to average (1.0 = normal)
             trap_hunter: Optional TrapHunter instance for fakeout detection

@@ -1440,7 +1440,7 @@ class TradingEngine:
             point: Point value
             shield: IronShield instance
             ppo_guardian: PPO Guardian instance
-            nexus: Optional NexusBrain instance
+
             oracle: Optional Oracle instance (Layer 4)
             pressure_metrics: Optional Tick Pressure Metrics
             trap_hunter: Optional TrapHunter instance for fakeout detection
