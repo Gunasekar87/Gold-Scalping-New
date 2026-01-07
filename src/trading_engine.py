@@ -337,7 +337,7 @@ class TradingEngine:
                 self._time_offset = raw_diff
                 self._last_offset_calc = now
                 if old_offset is None:
-                    logger.debug(f"[FRESHNESS] Detected Timezone Offset: {self._time_offset:.2f}s. Adjusting...")
+                    logger.info(f"[FRESHNESS] Detected Timezone Offset: {self._time_offset:.2f}s ({self._time_offset/3600:.1f} hours). Auto-adjusting freshness checks.")
                 elif abs(old_offset - self._time_offset) > 60:  # Log if drift > 1 minute
                     logger.warning(f"[FRESHNESS] Updated Timezone Offset: {old_offset:.2f}s → {self._time_offset:.2f}s")
             else:
@@ -347,10 +347,16 @@ class TradingEngine:
         offset = self._time_offset if self._time_offset is not None else 0.0
         
         try:
-            # Recalculate age with offset - PRIORITIZE THIS over tick.get('tick_age_s')
+            # FIX: Don't adjust timestamp - use raw_diff directly when offset exists
+            # The issue was double-adjustment: tick_ts might already be in broker time
             if tick_ts > 0:
-                adjusted_ts = tick_ts + offset
-                tick_age = abs(now - adjusted_ts)
+                if abs(offset) > 600:  # Large offset detected (timezone issue)
+                    # Use the pre-calculated raw_diff which is already correct
+                    tick_age = abs(now - tick_ts) - abs(offset)  # Subtract offset from age
+                    tick_age = max(0, tick_age)  # Ensure non-negative
+                else:
+                    # Normal case: no timezone issue
+                    tick_age = abs(now - tick_ts)
             else:
                 tick_age = float(tick.get('tick_age_s', float('inf')))
         except Exception as e:
@@ -1642,8 +1648,189 @@ class TradingEngine:
             
             # Use new Dashboard Logger
             ai_notes = f"RSI {rsi_value:.1f}"
-            # [USER REQUEST] Disabled floating logs to reduce noise
-            # TradingLogger.log_active_status(symbol, bucket_id, positions, pnl_pips, tp_pips, next_hedge_info, ai_notes)
+            
+            # Get zone boundaries from bucket
+            upper_level = 0
+            lower_level = 0
+            try:
+                if hasattr(self.position_manager, 'get_bucket_metadata'):
+                    bucket_meta = self.position_manager.get_bucket_metadata(bucket_id)
+                    if bucket_meta:
+                        upper_level = bucket_meta.get('upper_level', 0)
+                        lower_level = bucket_meta.get('lower_level', 0)
+            except Exception as e:
+                logger.debug(f"Could not get zone boundaries: {e}")
+            
+            # [INTELLIGENT AI COMMUNICATION] Context-aware, grounded reasoning
+            # Track last logged state to avoid spam
+            if not hasattr(self, '_last_ai_state'):
+                self._last_ai_state = {}
+            
+            # Create state signature for this position
+            state_key = f"{symbol}_{bucket_id}"
+            current_state = {
+                'pnl_pips': round(pnl_pips, 1),
+                'rsi': round(rsi_value, 1) if rsi_value else 0,
+                'price_zone': 'ABOVE' if current_price > upper_level else 'BELOW' if current_price < lower_level else 'INSIDE'
+            }
+            
+            last_state = self._last_ai_state.get(state_key, {})
+            
+            # === INTELLIGENT DECISION: WHAT TO COMMUNICATE ===
+            # Determine what's most important RIGHT NOW based on context
+            
+            # 1. Check for critical situations (always communicate)
+            zone_status = current_state['price_zone']
+            distance_to_upper = (upper_level - current_price) * pip_multiplier if upper_level else 0
+            distance_to_lower = (current_price - lower_level) * pip_multiplier if lower_level else 0
+            
+            is_critical = (
+                abs(distance_to_upper) < 10 or abs(distance_to_lower) < 10 or  # Near zone boundary
+                zone_status != last_state.get('price_zone', '') or  # Zone change
+                abs(current_state['pnl_pips'] - last_state.get('pnl_pips', 0)) > 50 or  # Large P&L swing
+                rsi_value > 80 or rsi_value < 20  # Extreme RSI
+            )
+            
+            # 2. Check for significant changes (communicate periodically)
+            is_significant = (
+                abs(current_state['pnl_pips'] - last_state.get('pnl_pips', 0)) > 20 or
+                abs(current_state['rsi'] - last_state.get('rsi', 0)) > 15 or
+                not last_state  # First time
+            )
+            
+            should_log = is_critical or is_significant
+            
+            if should_log:
+                # === GROUNDED ANALYSIS: Build message based on REAL market context ===
+                
+                # Determine PRIMARY focus (what matters most right now)
+                if zone_status == 'ABOVE' and abs(distance_to_upper) > 50:
+                    # CRITICAL: Price way outside zone
+                    focus = "HEDGE_IMMINENT"
+                    message = (
+                        f"🚨 CRITICAL ALERT - {symbol}\n"
+                        f"Price has broken {abs(distance_to_upper):.1f} pips ABOVE our zone boundary.\n"
+                        f"Current: {current_price:.5f} | Zone Top: {upper_level:.5f}\n\n"
+                        f"🧠 AI Analysis:\n"
+                        f"Market showing strong upward momentum. RSI at {rsi_value:.1f} "
+                        f"{'- OVERBOUGHT, reversal expected soon' if rsi_value > 70 else '- momentum still building'}.\n\n"
+                    )
+                    
+                    # Get Oracle prediction for grounding
+                    try:
+                        if hasattr(self, 'oracle') and self.oracle:
+                            pred = self.oracle.predict(symbol)
+                            if pred:
+                                oracle_says = pred.get('prediction', 'NEUTRAL')
+                                conf = pred.get('confidence', 0)
+                                if oracle_says == 'UP':
+                                    message += f"🔮 Oracle confirms: Expects FURTHER upside ({conf:.0%} confidence)\n"
+                                    message += f"⚡ Decision: HEDGE NOW to protect against continued rise\n"
+                                elif oracle_says == 'DOWN':
+                                    message += f"🔮 Oracle predicts: Reversal coming ({conf:.0%} confidence)\n"
+                                    message += f"⚡ Decision: WAIT for reversal - hedge only if continues higher\n"
+                                else:
+                                    message += f"🔮 Oracle sees: Consolidation likely\n"
+                                    message += f"⚡ Decision: Monitor closely - hedge if breaks higher\n"
+                    except:
+                        message += f"⚡ Decision: Hedge trigger at {abs(distance_to_upper) + 10:.0f} pips\n"
+                    
+                elif zone_status == 'BELOW' and abs(distance_to_lower) > 50:
+                    # CRITICAL: Price way outside zone (downside)
+                    focus = "HEDGE_IMMINENT"
+                    message = (
+                        f"🚨 CRITICAL ALERT - {symbol}\n"
+                        f"Price has broken {abs(distance_to_lower):.1f} pips BELOW our zone boundary.\n"
+                        f"Current: {current_price:.5f} | Zone Bottom: {lower_level:.5f}\n\n"
+                        f"🧠 AI Analysis:\n"
+                        f"Market showing strong downward pressure. RSI at {rsi_value:.1f} "
+                        f"{'- OVERSOLD, bounce expected' if rsi_value < 30 else '- selling continues'}.\n\n"
+                    )
+                    
+                    try:
+                        if hasattr(self, 'oracle') and self.oracle:
+                            pred = self.oracle.predict(symbol)
+                            if pred:
+                                oracle_says = pred.get('prediction', 'NEUTRAL')
+                                conf = pred.get('confidence', 0)
+                                if oracle_says == 'DOWN':
+                                    message += f"🔮 Oracle confirms: Expects FURTHER downside ({conf:.0%} confidence)\n"
+                                    message += f"⚡ Decision: HEDGE NOW to protect against continued fall\n"
+                                elif oracle_says == 'UP':
+                                    message += f"🔮 Oracle predicts: Bounce coming ({conf:.0%} confidence)\n"
+                                    message += f"⚡ Decision: WAIT for bounce - hedge only if continues lower\n"
+                    except:
+                        message += f"⚡ Decision: Hedge trigger at {abs(distance_to_lower) + 10:.0f} pips\n"
+                
+                elif pnl_pips > 20:
+                    # POSITIVE: In profit
+                    focus = "PROFIT_MANAGEMENT"
+                    message = (
+                        f"✅ PROFIT UPDATE - {symbol}\n"
+                        f"Position now +{pnl_pips:.1f} pips (${sum(p.get('profit', 0) for p in positions):+.2f})\n"
+                        f"Target: +{tp_pips:.1f} pips | Remaining: {tp_pips - pnl_pips:.1f} pips\n\n"
+                        f"🧠 AI Analysis:\n"
+                        f"Price at {current_price:.5f}, safely inside zone. "
+                        f"RSI {rsi_value:.1f} shows {'bullish momentum continuing' if rsi_value > 50 else 'momentum weakening'}.\n\n"
+                    )
+                    
+                    try:
+                        if hasattr(self, 'oracle') and self.oracle:
+                            pred = self.oracle.predict(symbol)
+                            if pred:
+                                oracle_says = pred.get('prediction', 'NEUTRAL')
+                                if oracle_says == 'UP':
+                                    message += f"🔮 Oracle: Predicts continued upside - HOLD for full TP\n"
+                                elif oracle_says == 'DOWN':
+                                    message += f"🔮 Oracle: Reversal warning - Consider taking profit early\n"
+                                else:
+                                    message += f"🔮 Oracle: Consolidation expected - HOLD current position\n"
+                    except:
+                        message += f"⚡ Plan: Hold for TP target\n"
+                
+                elif pnl_pips < -100:
+                    # NEGATIVE: Significant drawdown
+                    focus = "RECOVERY_MODE"
+                    message = (
+                        f"🔄 RECOVERY STATUS - {symbol}\n"
+                        f"Drawdown: {pnl_pips:.1f} pips (${sum(p.get('profit', 0) for p in positions):.2f})\n"
+                        f"Price: {current_price:.5f} | Zone: [{lower_level:.5f} - {upper_level:.5f}]\n\n"
+                        f"🧠 AI Analysis:\n"
+                        f"Position underwater but price {'inside' if zone_status == 'INSIDE' else 'outside'} recovery zone. "
+                        f"RSI {rsi_value:.1f} {'suggests reversal coming' if (rsi_value < 30 or rsi_value > 70) else 'neutral'}.\n\n"
+                    )
+                    
+                    try:
+                        if hasattr(self, 'oracle') and self.oracle:
+                            pred = self.oracle.predict(symbol)
+                            if pred:
+                                oracle_says = pred.get('prediction', 'NEUTRAL')
+                                trajectory = pred.get('trajectory', [])
+                                if oracle_says == 'UP' and first_pos.get('type') == 0:  # BUY position
+                                    message += f"🔮 Oracle: Predicts recovery ({trajectory[:2] if trajectory else 'N/A'} pips)\n"
+                                    message += f"⚡ Plan: WAIT for price recovery - no hedge needed yet\n"
+                                elif oracle_says == 'DOWN' and first_pos.get('type') == 1:  # SELL position
+                                    message += f"🔮 Oracle: Predicts recovery\n"
+                                    message += f"⚡ Plan: WAIT for price recovery\n"
+                                else:
+                                    message += f"🔮 Oracle: No immediate recovery signal\n"
+                                    message += f"⚡ Plan: Monitor for zone breach - hedge if necessary\n"
+                    except:
+                        message += f"⚡ Plan: Monitoring for recovery or hedge trigger\n"
+                
+                else:
+                    # NEUTRAL: Normal monitoring
+                    focus = "MONITORING"
+                    message = (
+                        f"📊 Market Update - {symbol}\n"
+                        f"P&L: {pnl_pips:+.1f} pips | RSI: {rsi_value:.1f} | Price: {current_price:.5f}\n"
+                        f"Status: {'Inside zone - normal monitoring' if zone_status == 'INSIDE' else 'Outside zone - watching closely'}\n"
+                    )
+                
+                # Log the intelligent, context-aware message
+                logger.info(f"\n{message}")
+                
+                self._last_ai_state[state_key] = current_state
 
         # Initialize bucket_closed to False
         bucket_closed = False
@@ -2959,9 +3146,12 @@ class TradingEngine:
                 rsi_disp = "NA" if current_rsi is None else f"{float(current_rsi):.1f}"
                 atr_disp = "NA" if current_atr is None else f"{float(current_atr):.4f}"
                 
+                # [AI STATUS MONITOR] Periodic Log
+                total_positions = len(symbol_positions)
+                
                 status_msg = (
                     f"\n>>> [AI STATUS MONITOR] <<<\n"
-                    f"Positions:    {len(symbol_positions)} Active\n"
+                    f"Positions:    {total_positions} Active\n"
                     f"Net PnL:      {pnl_str}\n"
                     f"Strategy:     {strategy_status}\n"
                     f"Regime:       {regime}\n"
@@ -2972,12 +3162,7 @@ class TradingEngine:
 
                 # Add specific AI focus for active positions
                 if symbol_positions:
-                    bucket_pnl = 0.0
-                    if symbol in self.position_manager.bucket_stats:
-                        bucket_pnl = self.position_manager.bucket_stats[symbol].net_profit
-                    
-                    status_msg += f"AI Focus:     Monitoring {len(symbol_positions)} positions for Exit/Hedge\n"
-                    status_msg += f"Bucket PnL:   ${bucket_pnl:.2f}\n"
+                    status_msg += f"AI Focus:     Monitoring {total_positions} positions for Exit/Hedge\n"
                     status_msg += f"Action:       Running Wick Intelligence & Profit Checks..."
                 else:
                     status_msg += f"Action:       Scanning for Entry Opportunities..."
