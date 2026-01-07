@@ -1012,73 +1012,10 @@ class RiskManager:
                 # TP/SL is already 0.0 (Virtual TP), so no need to remove it.
                 logger.info(f"[TRANSITION] Verified position #{first_ticket} exists. Proceeding to hedge.")
             
-            # === SMART HEDGE INTELLIGENCE ===
-            # Apply AI-driven hedge optimization before execution
-            smart_hedge_applied = False
-            original_hedge_lot = hedge_lot
-            
-            # Calculate loss distance for smart decisions
-            loss_pips = abs(first_pos['price_open'] - target_price) * pip_multiplier
-            
-            # Tier 1: Emergency Hedge (No AI, always execute)
-            if loss_pips > 150:
-                logger.warning(f"[SMART HEDGE] EMERGENCY MODE: Loss {loss_pips:.1f} pips > 150. Forcing immediate hedge.")
-                smart_hedge_applied = False  # Skip AI, execute immediately
-                
-            # Tier 2: Smart Delay (Oracle can postpone)
-            elif loss_pips > 80 and loss_pips <= 150:
-                # Check if Oracle predicts reversal
-                oracle_agrees_with_reversal = False
-                oracle_conf = 0.0
-                
-                if oracle and oracle_pred != "NEUTRAL":
-                    try:
-                        # Get Oracle confidence
-                        if hasattr(oracle, 'last_confidence'):
-                            oracle_conf = float(getattr(oracle, 'last_confidence', 0.0))
-                        
-                        # Check if Oracle predicts reversal (opposite of hedge direction)
-                        if next_action == "BUY" and oracle_pred == "DOWN":
-                            # We want to BUY hedge, Oracle says price going DOWN (reversal)
-                            oracle_agrees_with_reversal = True
-                        elif next_action == "SELL" and oracle_pred == "UP":
-                            # We want to SELL hedge, Oracle says price going UP (reversal)
-                            oracle_agrees_with_reversal = True
-                    except Exception as e:
-                        logger.debug(f"[SMART HEDGE] Oracle check failed: {e}")
-                
-                # If Oracle strongly predicts reversal, delay hedge
-                if oracle_agrees_with_reversal and oracle_conf > 0.70:
-                    logger.info(f"[SMART HEDGE] Oracle predicts reversal ({oracle_pred}, {oracle_conf:.0%}). Delaying hedge for better entry.")
-                    logger.info(f"[SMART HEDGE] Will force hedge if loss exceeds 150 pips or 60 seconds elapsed.")
-                    smart_hedge_applied = True
-                    return False  # Delay this cycle, will retry next cycle
-                    
-            # Tier 3: Trend Strength Filter (Reduce size if fighting trend)
-            if not smart_hedge_applied and loss_pips > 50:
-                # Calculate trend strength from recent price action
-                trend_strength = 0.0
-                try:
-                    # Simple trend: compare current price to 20-period average
-                    if len(positions) > 0:
-                        avg_entry = sum(p.get('price_open', 0) for p in positions) / len(positions)
-                        price_change = (target_price - avg_entry) / avg_entry
-                        trend_strength = abs(price_change) * 1000  # Normalize to 0-1 range
-                        trend_strength = min(trend_strength, 1.0)
-                except Exception:
-                    trend_strength = 0.0
-                
-                # If strong trend and we're hedging against it, reduce size
-                if trend_strength > 0.6:
-                    reduction_factor = 0.7  # Reduce to 70% size
-                    reduced_lot = hedge_lot * reduction_factor
-                    logger.info(f"[SMART HEDGE] Strong trend detected ({trend_strength:.2f}). Reducing hedge: {hedge_lot:.3f} → {reduced_lot:.3f} lots")
-                    hedge_lot = reduced_lot
-                    smart_hedge_applied = True
-            
-            # Log smart hedge decision
-            if smart_hedge_applied and hedge_lot != original_hedge_lot:
-                logger.info(f"[SMART HEDGE] Adaptive sizing applied: {original_hedge_lot:.3f} → {hedge_lot:.3f} lots")
+            # === HYBRID HEDGE INTELLIGENCE ACTIVE ===
+            # Old Smart Hedge code removed - now using comprehensive Hybrid Intelligence
+            # (Lines 856-930 above)
+
             
             # === ZERO LATENCY EXECUTION ===
             # Execute hedge immediately
