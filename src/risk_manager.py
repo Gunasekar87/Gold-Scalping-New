@@ -1095,10 +1095,23 @@ class RiskManager:
             from src.utils.trader_dashboard import get_dashboard
             dashboard = get_dashboard()
             
-            # Determine hedge reason
-            hedge_reason = f"Zone breach ({zone_width_points/point:.0f} pips)"
-            if volatility_ratio > 1.5:
-                hedge_reason += f" | High volatility ({volatility_ratio:.1f}x)"
+            # Determine hedge reason - show Hybrid Intelligence summary
+            if 'hedge_decision' in locals() and hedge_decision:
+                # Use Hybrid Intelligence reasoning
+                hedge_reason = f"Hybrid AI ({hedge_decision.confidence:.0%} confidence)"
+                # Add key factors that influenced the decision
+                significant_factors = []
+                for factor_name, factor_value in hedge_decision.factors.items():
+                    if abs(factor_value - 1.0) > 0.15:  # Significant adjustment
+                        adjustment = (factor_value - 1.0) * 100
+                        significant_factors.append(f"{factor_name.title()}: {adjustment:+.0f}%")
+                if significant_factors:
+                    hedge_reason += f" | {', '.join(significant_factors[:2])}"  # Show top 2 factors
+            else:
+                # Fallback to old message if Hybrid Intelligence not available
+                hedge_reason = f"Zone breach ({zone_width_points/point:.0f} pips)"
+                if volatility_ratio > 1.5:
+                    hedge_reason += f" | High volatility ({volatility_ratio:.1f}x)"
             
             dashboard.trade_entry(
                 action=next_action,
