@@ -1118,6 +1118,7 @@ class RiskManager:
                 if volatility_ratio > 1.5:
                     hedge_reason += f" | High volatility ({volatility_ratio:.1f}x)"
             
+            
             dashboard.trade_entry(
                 action=next_action,
                 lots=hedge_lot,
@@ -1125,6 +1126,9 @@ class RiskManager:
                 reason=hedge_reason,
                 trade_type="HEDGE"
             )
+            
+            # CRITICAL: Ensure hedge is visible in terminal (bypass logger config)
+            print(f"🛡️ HEDGE: {next_action} {hedge_lot:.2f} @ {target_price:.2f} - {hedge_reason}", flush=True)
 
             # Remove TP/SL from additional positions (for hedges beyond the first)
             # First hedge TP/SL already removed above in atomic transition
