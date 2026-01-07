@@ -2268,9 +2268,13 @@ class TradingEngine:
                         logger.debug(f"[SIGNAL] ✅ Strong validation ({validation.score:.0%})")
                         reason = f"{reason} | Validated ({validation.score:.0%})"
                     elif validation.score < 0.40:
-                        # Very weak validation - warn trader
-                        logger.warning(f"[SIGNAL] ⚠️ Weak signal ({validation.score:.0%}): {', '.join(validation.failed_factors[:2])}")
-                        reason = f"{reason} | Weak ({validation.score:.0%})"
+                        # CRITICAL: Block very weak signals to prevent bad trades
+                        logger.warning(
+                            f"[SIGNAL] 🚫 BLOCKED: Validation too weak ({validation.score:.0%}). "
+                            f"Failed factors: {', '.join(validation.failed_factors[:3])}"
+                        )
+                        logger.info(f"[SIGNAL] Waiting for stronger signal (need ≥40% validation)")
+                        return  # Block the trade
                     # Moderate validation (40-80%) - no logging, just proceed
                     
 
