@@ -1880,7 +1880,7 @@ class TradingEngine:
         
         logger.info(f"[TP_CHECK] About to call should_close_bucket for {bucket_id}")
         should_close, confidence = self.position_manager.should_close_bucket(
-            bucket_id, ppo_guardian, nexus, market_data
+            bucket_id, ppo_guardian, market_data
         )
         logger.info(f"[TP_CHECK] should_close_bucket returned: {should_close}, confidence: {confidence}")
 

@@ -1372,7 +1372,7 @@ class PositionManager:
         dynamic_buffer = spread_pips * volatility_factor * safety_margin
         return base_target_pips + dynamic_buffer
 
-    def should_close_bucket(self, bucket_id: str, ppo_guardian, nexus=None, market_data=None) -> Tuple[bool, float]:
+    def should_close_bucket(self, bucket_id: str, ppo_guardian, market_data=None) -> Tuple[bool, float]:
         """
         Futuristic AI-driven bucket exit logic for high-intelligence scalping.
 
