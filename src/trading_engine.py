@@ -2261,23 +2261,19 @@ class TradingEngine:
                     if validation.should_invert and validation.score < 0.20:
                         # Very poor validation - flip direction
                         action = "SELL" if action == "BUY" else "BUY"
-                        logger.warning(f"[DIRECTION_VALIDATOR] Signal INVERTED: {validation.reasoning}")
-                        logger.warning(f"[DIRECTION_VALIDATOR] Failed factors: {validation.failed_factors}")
+                        logger.warning(f"[SIGNAL] ⚠️ INVERTED {action}: {validation.reasoning}")
                         reason = f"{reason} | INVERTED ({validation.score:.0%})"
                     elif validation.score >= 0.80:
-                        # Strong validation
-                        logger.info(f"[DIRECTION_VALIDATOR] ✅ Strong validation ({validation.score:.0%}): {validation.reasoning}")
+                        # Strong validation - only log in debug
+                        logger.debug(f"[SIGNAL] ✅ Strong validation ({validation.score:.0%})")
                         reason = f"{reason} | Validated ({validation.score:.0%})"
-                    elif validation.score < 0.50:
-                        # Weak validation
-                        logger.warning(f"[DIRECTION_VALIDATOR] ⚠️ Weak validation ({validation.score:.0%}): {validation.reasoning}")
-                        logger.warning(f"[DIRECTION_VALIDATOR] Failed factors: {validation.failed_factors}")
+                    elif validation.score < 0.40:
+                        # Very weak validation - warn trader
+                        logger.warning(f"[SIGNAL] ⚠️ Weak signal ({validation.score:.0%}): {', '.join(validation.failed_factors[:2])}")
                         reason = f"{reason} | Weak ({validation.score:.0%})"
+                    # Moderate validation (40-80%) - no logging, just proceed
                     
-                    # Log confidence adjustment
-                    if abs(original_confidence - confidence) > 0.05:
-                        logger.info(f"[DIRECTION_VALIDATOR] Confidence adjusted: {original_confidence:.2f} → {confidence:.2f}")
-                    
+
                     # Store validation score in metadata
                     validation_score = validation.score
                     validation_factors = f"{validation.passed_factors}/{validation.total_factors}"
