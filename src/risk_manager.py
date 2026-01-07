@@ -1061,6 +1061,62 @@ class RiskManager:
                 logger.debug(f"[WICK INTELLIGENCE] Hedge check failed: {wick_e}")
                 # Continue with hedge if wick check fails
 
+            # === CRITICAL: TREND GUARD ===
+            # Prevent fighting strong trends - use Oracle predictions
+            # This is a SAFETY CHECK to avoid counter-trend hedges
+            if oracle and oracle_pred:
+                try:
+                    oracle_conf = float(getattr(oracle, 'last_confidence', 0.0))
+                    
+                    # Block SELL hedges in strong uptrends
+                    if next_action == "SELL" and oracle_pred == "UP" and oracle_conf > 0.65:
+                        logger.warning(
+                            f"[TREND GUARD] 🚫 BLOCKED SELL hedge: Oracle predicts UP ({oracle_conf:.0%} confidence). "
+                            f"Refusing to fight uptrend."
+                        )
+                        logger.info(f"[TREND GUARD] Will retry if trend reverses or confidence drops.")
+                        return False
+                    
+                    # Block BUY hedges in strong downtrends
+                    elif next_action == "BUY" and oracle_pred == "DOWN" and oracle_conf > 0.65:
+                        logger.warning(
+                            f"[TREND GUARD] 🚫 BLOCKED BUY hedge: Oracle predicts DOWN ({oracle_conf:.0%} confidence). "
+                            f"Refusing to fight downtrend."
+                        )
+                        logger.info(f"[TREND GUARD] Will retry if trend reverses or confidence drops.")
+                        return False
+                    
+                    # Log when hedge aligns with trend (good sign)
+                    elif (next_action == "BUY" and oracle_pred == "UP") or (next_action == "SELL" and oracle_pred == "DOWN"):
+                        logger.info(f"[TREND GUARD] ✅ Hedge aligns with Oracle prediction ({oracle_pred}, {oracle_conf:.0%})")
+                    
+                except Exception as trend_e:
+                    logger.debug(f"[TREND GUARD] Check failed: {trend_e}, proceeding with hedge")
+
+            # === LIMIT CONSECUTIVE HEDGES ===
+            # Prevent stacking too many hedges in same direction
+            try:
+                consecutive_count = 0
+                target_type = 0 if next_action == "BUY" else 1
+                
+                for pos in reversed(positions):
+                    if pos.get('type') == target_type:
+                        consecutive_count += 1
+                    else:
+                        break
+                
+                if consecutive_count >= 4:  # Max 4 consecutive hedges in same direction
+                    logger.warning(
+                        f"[HEDGE LIMIT] 🚫 BLOCKED: Already have {consecutive_count} consecutive {next_action} hedges. "
+                        f"Refusing to add more."
+                    )
+                    logger.info(f"[HEDGE LIMIT] Wait for price reversal or close bucket.")
+                    return False
+                    
+            except Exception as limit_e:
+                logger.debug(f"[HEDGE LIMIT] Check failed: {limit_e}, proceeding with hedge")
+
+
             atr_ok = bool(atr_val is not None and float(atr_val) > 0)
             rsi_ok = bool(rsi_value is not None)
             strict_ok = (not bool(strict_entry)) or (atr_ok and rsi_ok)
