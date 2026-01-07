@@ -27,21 +27,50 @@ except ImportError as e:
 # This restores the missing class so old models can load without warnings
 try:
     import stable_baselines3.common.utils
+    
+    # Define FloatSchedule with robust initialization
+    class FloatSchedule:
+        """Fixed FloatSchedule for SB3 compatibility."""
+        def __init__(self, start_value=1.0):
+            # Ensure start_value is always set, even if called with no args
+            self.start_value = float(start_value) if start_value is not None else 1.0
+            
+        def __call__(self, progress=0.0):
+            # Return start_value, ensuring it exists
+            return getattr(self, 'start_value', 1.0)
+        
+        def __repr__(self):
+            return f"FloatSchedule(start_value={self.start_value})"
+    
+    # Define ConstantSchedule with robust initialization
+    class ConstantSchedule:
+        """Fixed ConstantSchedule for SB3 compatibility."""
+        def __init__(self, value=1.0):
+            # Ensure value is always set
+            self.value = float(value) if value is not None else 1.0
+            # Also set start_value for compatibility
+            self.start_value = self.value
+            
+        def __call__(self, progress=0.0):
+            # Return value, ensuring it exists
+            return getattr(self, 'value', getattr(self, 'start_value', 1.0))
+        
+        def __repr__(self):
+            return f"ConstantSchedule(value={self.value})"
+    
+    # Monkey-patch into stable_baselines3.common.utils
     if not hasattr(stable_baselines3.common.utils, 'FloatSchedule'):
-        class FloatSchedule:
-            def __init__(self, start_value):
-                self.start_value = start_value
-            def __call__(self, progress):
-                return self.start_value
         stable_baselines3.common.utils.FloatSchedule = FloatSchedule
         
     if not hasattr(stable_baselines3.common.utils, 'ConstantSchedule'):
-        class ConstantSchedule:
-            def __init__(self, value):
-                self.value = value
-            def __call__(self, progress):
-                return self.value
         stable_baselines3.common.utils.ConstantSchedule = ConstantSchedule
+    
+    # Also patch into the module's __dict__ for pickle compatibility
+    import sys
+    if 'stable_baselines3.common.utils' in sys.modules:
+        sys.modules['stable_baselines3.common.utils'].FloatSchedule = FloatSchedule
+        sys.modules['stable_baselines3.common.utils'].ConstantSchedule = ConstantSchedule
+        
 except (ImportError, AttributeError) as e:
     logger = logging.getLogger("PPOGuardian")
     logger.warning(f"SB3 compatibility patch failed (non-critical): {e}")
