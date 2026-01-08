@@ -158,6 +158,7 @@ class RiskManager:
     def __init__(self, zone_config: ZoneConfig):
         self.config = zone_config
         self._hedge_states: Dict[str, HedgeState] = {}
+        self._pending_hedges: Dict[str, float] = {}  # Tracks in-flight hedge attempts
         self._global_position_cap = 10
         self._lock = threading.Lock()
         self._last_log_time = 0.0
@@ -357,6 +358,13 @@ class RiskManager:
             True if hedge was executed
         """
         global logger  # Ensure logger is accessible in exception handler
+
+        # [RACE CONDITION FIX] Double Hedge Prevention Check
+        # Check if we have a pending hedge that hasn't been confirmed yet
+        last_pending = self._pending_hedges.get(symbol, 0)
+        if time.time() - last_pending < 10.0:  # 10s cooldown for pending confirmation
+             logger.warning(f"[{symbol}] [RACE_CONDITION] Skipping hedge: Pending order execution from {time.time() - last_pending:.1f}s ago")
+             return False
         if strict_entry and (rsi_value is None or atr_val is None or float(atr_val) <= 0):
             logger.warning(f"[STRICT] Zone recovery blocked: missing ATR/RSI (atr={atr_val}, rsi={rsi_value})")
             return False
@@ -1242,6 +1250,9 @@ class RiskManager:
             position_manager.active_learning_trades[first_ticket] = trade_metadata
             
             logger.info(f"[ZONE_DEBUG] Executing hedge {new_hedge_level}, saving to metadata")
+            
+            # [RACE CONDITION FIX] Lock this symbol immediately before network call
+            self._pending_hedges[symbol] = time.time()
             
             # Execute hedge order
             result = broker.execute_order(
