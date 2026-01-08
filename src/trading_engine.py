@@ -960,10 +960,12 @@ class TradingEngine:
         if not self.broker.is_trade_allowed():
             return False, "Algo trading disabled"
 
-        # [AI INTELLIGENCE] Check News Filter
-        # Prevent entries during high-impact news events
-        if self.news_filter and not self.news_filter.should_trade():
-            return False, "High-impact news event imminent or active"
+        # [AI INTELLIGENCE] Check News/Time Filter
+        # Prevent entries during high-impact news events or low-liquidity zones
+        if self.news_filter:
+            is_safe, news_reason = self.news_filter.check_status()
+            if not is_safe:
+                return False, f"Entry Blocked: {news_reason}"
 
         # Check for recent bucket closes
         symbol = signal.symbol

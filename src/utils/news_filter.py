@@ -12,9 +12,10 @@ class NewsFilter:
         # Example: Block NFP (First Friday of month, 8:30 AM EST)
         # This is a simplified implementation.
         
-    def is_news_event(self) -> bool:
+    def check_status(self) -> tuple[bool, str]:
         """
-        Checks if currently in a high-impact news window.
+        Checks if it is safe to trade or if blocked by a time window.
+        Returns: (is_safe, reason)
         """
         # [FIX] Use UTC for consistent market hours regardless of server location
         now = datetime.datetime.utcnow()
@@ -22,11 +23,11 @@ class NewsFilter:
         # 1. BLOCK WEEKENDS (Friday 21:00 UTC to Sunday 21:00 UTC)
         # Forex/Gold usually closes ~22:00 UTC Friday and opens ~22:00 UTC Sunday
         if now.weekday() == 4 and now.hour >= 21: # Friday night (UTC)
-            return True
+            return False, "Market Closed (Weekend - Fri Night)"
         if now.weekday() == 5: # Saturday
-            return True
+            return False, "Market Closed (Weekend - Sat)"
         if now.weekday() == 6 and now.hour < 21: # Sunday morning (UTC)
-            return True
+            return False, "Market Closed (Weekend - Sun Morning)"
             
         # 2. BLOCK SPECIFIC HIGH VOLATILITY WINDOWS (UTC)
         # Example: US Market Open Volatility (13:30 - 14:00 UTC)
@@ -37,20 +38,16 @@ class NewsFilter:
         
         # Block 13:25 - 13:35 UTC (US Open)
         if 13.41 <= current_hour <= 13.58:
-            # logger.info("[NEWS] US Market Open Volatility Window")
-            return True
+            return False, "US Market Open Volatility Window (13:25-13:35 UTC)"
             
         # 3. [REALIST] BLOCK ASIAN SESSION LOW LIQUIDITY (00:00 - 06:00 UTC)
         # Gold spreads are often elevated and movement is minimal/random.
         if 0.0 <= current_hour < 6.0:
-            return True
+            return False, "Asian Session Low Liquidity (00:00-06:00 UTC)"
             
-        return False
+        return True, "Safe to Trade"
 
     def should_trade(self) -> bool:
-        """
-        Returns True if safe to trade, False if news event.
-        """
-        if self.is_news_event():
-            return False
-        return True
+        """Legacy compatibility wrapper."""
+        ok, _ = self.check_status()
+        return ok
