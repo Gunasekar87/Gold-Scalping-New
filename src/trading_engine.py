@@ -2248,6 +2248,15 @@ class TradingEngine:
             else:
                 # FIX: Handle both Object (dot notation) and Dict (subscript) just in case
                 positions = []
+                # DEBUG: Log all visible symbols to help user debug matching issues
+                if all_pos:
+                    visible_symbols = set()
+                    for p in all_pos:
+                        s = p.symbol if hasattr(p, 'symbol') else (p.get('symbol') if isinstance(p, dict) else 'Unknown')
+                        visible_symbols.add(s)
+                    # logger.info(f"[DEBUG] Visible positions in broker: {list(visible_symbols)}")
+
+                positions = []
                 for p in all_pos:
                      # Adapt to Object or Dict
                      if hasattr(p, 'symbol'):
@@ -2255,7 +2264,18 @@ class TradingEngine:
                      else:
                          sym = p.get('symbol') if isinstance(p, dict) else None
                          
-                     if sym and sym.lower() == symbol.lower():
+                     # [ROBUSTNESS] Fuzzy Match (Handle suffixes like .m, .pro, +, etc.)
+                     # If configured "XAUUSD" matches "XAUUSD.m" or "XAUUSD+"
+                     match = False
+                     if sym:
+                         sym_clean = sym.lower()
+                         cfg_clean = symbol.lower()
+                         if sym_clean == cfg_clean:
+                             match = True
+                         elif sym_clean.startswith(cfg_clean) and len(sym_clean) <= len(cfg_clean) + 4:
+                             match = True
+                     
+                     if match:
                          # FIX: Convert namedtuple to dict for downstream compatibility
                          if hasattr(p, '_asdict'):
                              positions.append(p._asdict())
@@ -2530,8 +2550,9 @@ class TradingEngine:
                         # Strong validation - only log in debug
                         logger.debug(f"[SIGNAL] ✅ Strong validation ({validation.score:.0%})")
                         reason = f"{reason} | Validated ({validation.score:.0%})"
-                    elif validation.score < 0.40:
+                    elif validation.score < 0.30:
                         # CRITICAL: Block very weak signals to prevent bad trades
+                        # [ADJUSTMENT] Lowered to 30% to allow defensive entries in CHAOS
                         logger.warning(
                             f"[SIGNAL] 🚫 BLOCKED: Validation too weak ({validation.score:.0%}). "
                             f"Failed factors: {', '.join(validation.failed_factors[:3])}"
