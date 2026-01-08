@@ -596,7 +596,32 @@ class RiskManager:
             zone_width_points, tp_width_points = self.calculate_zone_parameters(
                 positions, tick, point, ppo_guardian, atr_val=atr_val
             )
-            
+
+            # ====================================================================
+            # PHASE 4: HEDGE INTELLIGENCE (PHYSICS & CHEMISTRY)
+            # Implemented: January 2026
+            # ====================================================================
+            if pressure_metrics:
+                # 1. The Chemist (VPIN - Toxicity)
+                # If flow is toxic (Informed Traders acting), do not provide liquidity (Hedge).
+                # Wait for toxic flow to subside.
+                vpin = pressure_metrics.get('chemistry', {}).get('vpin', 0.0)
+                if vpin > 0.6:
+                    # Check if we are already in critical drawdown?
+                    # If drawdown is catastrophic (> 20%), we might have to hedge anyway.
+                    # But for normal zone operations, we wait.
+                    logger.warning(f"[{symbol}] [CHEMIST] Toxic Flow Detected (VPIN={vpin:.2f} > 0.6). DELAYING HEDGE.")
+                    return False
+
+                # 2. The Physicist (Reynolds - Turbulence)
+                # If flow is turbulent (Breakout/Crash), the standard grid is too tight.
+                # Widen the zone to let the turbulence pass without hitting stops/triggers too early.
+                reynolds = pressure_metrics.get('physics', {}).get('reynolds_number', 0.0)
+                if reynolds > 2000:
+                    turbulence_multiplier = 1.25
+                    zone_width_points *= turbulence_multiplier
+                    logger.info(f"[{symbol}] [PHYSICIST] High Turbulence (Re={reynolds:.0f}). Widening Zone by x{turbulence_multiplier} -> {zone_width_points/point:.1f} pips")
+
             # === INTELLIGENT VOLATILITY SCALING ===
             # Adaptive scaling based on market regime and volatility level
             # More conservative than simple linear scaling
