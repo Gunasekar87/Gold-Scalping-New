@@ -18,7 +18,7 @@ from enum import Enum, auto
 # ============================================================================
 
 SYSTEM_NAME: Final[str] = "A.E.T.H.E.R."
-SYSTEM_VERSION: Final[str] = "7.0.7"  # Ghost Protocol Fix (Jan 8, 2026)
+SYSTEM_VERSION: Final[str] = "7.0.8"  # Adaptive Intelligence Sync (Jan 8, 2026)
 SYSTEM_FULL_NAME: Final[str] = "Adaptive Evolution Trading & Hedging Execution Robot"
 
 

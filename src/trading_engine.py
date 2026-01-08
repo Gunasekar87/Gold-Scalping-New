@@ -2799,7 +2799,7 @@ class TradingEngine:
                 adaptive_strategy = "MICRO_SCALP"
                 logger.info(f"[ADAPTIVE] Weak signal ({validation_score:.0%}) → Minimal size (40%), micro-scalp TP/SL")
                 
-            elif validation_score >= 0.30:
+            elif validation_score >= 0.25:
                 # Very weak - Range trading only
                 validation_multiplier = 0.25  # 25% size
                 tp_multiplier = 0.3  # Extremely tight TP
