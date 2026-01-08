@@ -40,6 +40,11 @@ class NewsFilter:
             # logger.info("[NEWS] US Market Open Volatility Window")
             return True
             
+        # 3. [REALIST] BLOCK ASIAN SESSION LOW LIQUIDITY (00:00 - 06:00 UTC)
+        # Gold spreads are often elevated and movement is minimal/random.
+        if 0.0 <= current_hour < 6.0:
+            return True
+            
         return False
 
     def should_trade(self) -> bool:

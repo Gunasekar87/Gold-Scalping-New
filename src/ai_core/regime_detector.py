@@ -28,6 +28,7 @@ class MarketRegime(Enum):
     VOLATILE = "volatile"
     QUIET = "quiet"
     BREAKOUT = "breakout"
+    CHAOTIC = "chaotic"
 
 
 @dataclass
@@ -91,6 +92,14 @@ class RegimeDetector:
         # Calculate metrics
         metrics = {}
         
+        # [GEOMETRICIAN] 1. Shannon Entropy (Chaos Detection)
+        entropy = self._calculate_shannon_entropy(candles)
+        metrics['entropy'] = entropy
+        
+        # [GEOMETRICIAN] 2. Hurst Exponent (Fractal Memory)
+        hurst = self._calculate_hurst_exponent(candles)
+        metrics['hurst'] = hurst
+
         # 1. Calculate ADX (trend strength)
         adx = self._calculate_adx(candles)
         metrics['adx'] = adx
@@ -109,7 +118,7 @@ class RegimeDetector:
         
         # Determine regime based on metrics
         regime, confidence = self._classify_regime(
-            adx, atr_ratio, oscillation, is_breakout, breakout_direction
+            adx, atr_ratio, oscillation, is_breakout, breakout_direction, entropy, hurst
         )
         
         # Generate recommendation
@@ -246,6 +255,102 @@ class RegimeDetector:
             logger.debug(f"[REGIME] Error calculating oscillation: {e}")
             return 0.5
     
+    def _calculate_shannon_entropy(self, candles: List[Dict], bins: int = 10) -> float:
+        """
+        Calculate Shannon Entropy to measure market disorder/randomness.
+        H = -sum(p * log2(p))
+        
+        Returns:
+            start_entropy: Normalized entropy (0.0=Ordered, 1.0=Max Chaos)
+        """
+        if len(candles) < 30:
+            return 0.5
+            
+        try:
+            # 1. Get returns
+            closes = np.array([float(c.get('close', 0)) for c in candles])
+            if len(closes) < 2:
+                return 0.5
+                
+            returns = np.diff(closes) / closes[:-1]
+            returns = returns[~np.isnan(returns)] # Filter NaNs
+            
+            if len(returns) == 0 or np.all(returns == 0):
+                return 0.0
+                
+            # 2. Discretize into bins (Probability Mass Function)
+            hist, _ = np.histogram(returns, bins=bins, density=True)
+            
+            # 3. Calculate Entopy
+            # Convert density to probabilities (sum to 1) by multiplying by bin width
+            # Approximate by just using normalized counts
+            hist, _ = np.histogram(returns, bins=bins)
+            probs = hist / np.sum(hist)
+            probs = probs[probs > 0] # Avoid log(0)
+            
+            entropy = -np.sum(probs * np.log2(probs))
+            
+            # 4. Normalize (Max entropy is log2(bins))
+            max_entropy = np.log2(bins)
+            normalized_entropy = entropy / max_entropy
+            
+            return float(min(1.0, max(0.0, normalized_entropy)))
+            
+        except Exception as e:
+            logger.debug(f"[GEOMETRICIAN] Error calculating Entropy: {e}")
+            return 0.5
+
+    def _calculate_hurst_exponent(self, candles: List[Dict]) -> float:
+        """
+        Calculate Hurst Exponent to measure long-term memory.
+        H = 0.5 (Random), H > 0.5 (Trend), H < 0.5 (Mean Reversion)
+        Using Rescaled Range (R/S) analysis.
+        """
+        if len(candles) < 50:
+            return 0.5
+            
+        try:
+            # Prepare data
+            closes = np.array([float(c.get('close', 0)) for c in candles[-100:]]) # Use last 100 max
+            
+            # Simple R/S analysis approximation
+            # (Full R/S is complex, we use a robust approximation for speed)
+            
+            # Calculate returns
+            returns = np.diff(np.log(closes))
+            
+            # Mean return
+            mean_return = np.mean(returns)
+            
+            # Cumulative deviation from mean
+            deviations = returns - mean_return
+            cum_deviations = np.cumsum(deviations)
+            
+            # Range
+            R = np.max(cum_deviations) - np.min(cum_deviations)
+            
+            # Standard Deviation
+            S = np.std(returns)
+            
+            if S == 0:
+                return 0.5
+                
+            # R/S = c * (N)^H
+            # log(R/S) = log(c) + H * log(N)
+            # H ~ log(R/S) / log(N)
+            
+            RS = R / S
+            N = len(returns)
+            
+            # Simplified point estimate
+            H = np.log(RS) / np.log(N)
+            
+            return float(min(1.0, max(0.0, H)))
+            
+        except Exception as e:
+            logger.debug(f"[GEOMETRICIAN] Error calculating Hurst: {e}")
+            return 0.5
+
     def _detect_breakout(self, candles: List[Dict]) -> tuple:
         """
         Detect if price is breaking out of recent range.
@@ -281,13 +386,19 @@ class RegimeDetector:
             return False, None
     
     def _classify_regime(self, adx: float, atr_ratio: float, oscillation: float,
-                        is_breakout: bool, breakout_direction: Optional[str]) -> tuple:
+                        is_breakout: bool, breakout_direction: Optional[str],
+                        entropy: float = 0.5, hurst: float = 0.5) -> tuple:
         """
         Classify market regime based on metrics.
         
         Returns:
             (regime, confidence)
         """
+        # [GEOMETRICIAN] Priority 0: CHAOS Detection
+        # "Knowing when not to trade is as important as knowing when to trade."
+        if entropy > 0.85:
+            return MarketRegime.CHAOTIC, 0.95
+            
         # Priority 1: Breakout
         if is_breakout:
             return MarketRegime.BREAKOUT, 0.9
@@ -298,19 +409,27 @@ class RegimeDetector:
         elif atr_ratio < self.atr_quiet_ratio:
             return MarketRegime.QUIET, 0.80
         
-        # Priority 3: Trending vs Ranging
-        if adx > self.adx_trending_threshold:
+        # Priority 3: Trending vs Ranging (Refined by Hurst)
+        is_trending_adx = adx > self.adx_trending_threshold
+        is_trending_hurst = hurst > 0.55
+        
+        if is_trending_adx or is_trending_hurst:
+            confidence = 0.75
+            if is_trending_adx and is_trending_hurst:
+                confidence = 0.90
+                
             # Determine trend direction from recent price action
             if len(self._price_history) >= 20:
                 recent_prices = list(self._price_history)[-20:]
                 if recent_prices[-1] > recent_prices[0]:
-                    return MarketRegime.TRENDING_UP, 0.75
+                    return MarketRegime.TRENDING_UP, confidence
                 else:
-                    return MarketRegime.TRENDING_DOWN, 0.75
-            return MarketRegime.TRENDING_UP, 0.60  # Default to up if unclear
+                    return MarketRegime.TRENDING_DOWN, confidence
+            return MarketRegime.TRENDING_UP, 0.60
         
-        elif adx < self.adx_ranging_threshold or oscillation > 0.5:
-            return MarketRegime.RANGING, 0.70
+        elif adx < self.adx_ranging_threshold or oscillation > 0.5 or hurst < 0.45:
+            confidence = 0.70
+            return MarketRegime.RANGING, confidence
         
         # Default: Ranging with low confidence
         return MarketRegime.RANGING, 0.50

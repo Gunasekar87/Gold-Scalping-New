@@ -2331,6 +2331,10 @@ class TradingEngine:
             # Note: atr_value/trend_strength/rsi_value/macro_context are precomputed above,
             # and in strict mode are guaranteed to be based on real data.
             
+            # 1. Supervisor: Detect Regime
+            # Prepare data for Supervisor
+            # Note: atr_value/trend_strength/rsi_value/macro_context are precomputed above
+            
             supervisor_data = {
                 'atr': atr_value,
                 'trend_strength': trend_strength,
@@ -2339,8 +2343,9 @@ class TradingEngine:
                 'pressure_metrics': pressure_metrics
             }
             
-            regime = self.supervisor.detect_regime(supervisor_data)
-            logger.info(f"[SUPERVISOR] Market Regime: {regime.name}")
+            # [UPGRADE] Pass candle history to Supervisor for Geometrician (Entropy/Hurst) Analysis
+            regime = self.supervisor.detect_regime(supervisor_data, candles=history)
+            logger.info(f"[SUPERVISOR] Market Regime: {regime.name} ({regime.confidence:.2f}) | {regime.description}")
             
             # 2. Supervisor: Select Worker
             worker_name = self.supervisor.get_active_worker(regime)
@@ -2379,8 +2384,6 @@ class TradingEngine:
                 action, confidence, reason = self.trend_worker.get_signal(market_context)
             else:
                 # Fallback for CHAOS or DEFENSIVE regimes
-                # Use RangeWorker but with higher confidence threshold implicitly handled by logic
-                # Or just default to RangeWorker as it's safer
                 action, confidence, reason = self.range_worker.get_signal(market_context)
                 reason = f"[DEFENSIVE] {reason}"
 
@@ -2392,7 +2395,6 @@ class TradingEngine:
                     confidence = min(1.0, confidence + (0.05 * oracle_confidence))
                     reason = f"{reason} | Oracle Align ({oracle_prediction} {oracle_confidence:.2f})"
                 else:
-                    # Strong disagreement should materially reduce confidence.
                     confidence = max(0.0, confidence - (0.40 * oracle_confidence))
                     reason = f"{reason} | Oracle Veto ({oracle_prediction} {oracle_confidence:.2f})"
 
@@ -2400,15 +2402,10 @@ class TradingEngine:
             confidence = max(0.0, min(1.0, confidence))
                 
             # [TRAP HUNTER] Check for institutional traps (Fakeouts/Icebergs)
-            # This is the "Ghost Protocol" veto that blocks entries into manipulated zones.
-            
-            # 1. Update Trap Hunter with latest data
             self.trap_hunter.scan(symbol, history, tick)
-            
-            # 2. Check veto
             is_trap = self.trap_hunter.is_trap(action)
             if action != "HOLD" and is_trap:
-                log_msg = f"[TRAP DETECTED] {action} signal blocked by Trap Hunter (Fakeout/Iceberg/Manipulation)."
+                log_msg = f"[TRAP DETECTED] {action} signal blocked by Trap Hunter."
                 logger.warning(log_msg)
                 action = "HOLD"
                 reason = f"{reason} | [TRAP-VETO] Institutional Trap Detected"
@@ -2416,6 +2413,21 @@ class TradingEngine:
 
             # Create Signal Object
             signal = None
+            # ====================================================================
+            # [MASTER ALGORITHM] THE UNIFIED FIELD THEORY VALIDATION LOOP
+            # Integrated: January 8, 2026
+            # ====================================================================
+            if action != "HOLD" and confidence > 0.5:
+                physics_ok, physics_reason = self._validate_physics_conditions(
+                    action, regime, pressure_metrics, tick
+                )
+                
+                if not physics_ok:
+                    logger.warning(f"[PHYSICS BLOCKED] {action} blocked: {physics_reason}")
+                    action = "HOLD"
+                    reason = f"{reason} | [PHYSICS] {physics_reason}"
+                    confidence = 0.0
+
             if action != "HOLD" and confidence > 0.5:
                 # [DIRECTION VALIDATOR] - 7-Factor Intelligence Check (with error handling)
                 try:

@@ -191,24 +191,127 @@ class TickPressureAnalyzer:
                 'sell_pressure': 0.5
             }
     
-    def get_combined_analysis(self, tick, point_value=0.01):
+    # ============================================================================
+    # ENHANCEMENT 3: The Physicist & The Chemist (Unified Field Theory)
+    # Added: January 8, 2026
+    # Purpose: Deterministic prediction using Hydro-Thermodynamics
+    # ============================================================================
+
+    def calculate_vpin(self) -> float:
         """
-        Get both pressure metrics and order flow analysis in one call.
+        [THE CHEMIST] Calculate Volume-Synchronized Probability of Informed Trading.
+        Approximation: VPIN = |V_buy - V_sell| / Total_Volume
+        
+        Returns:
+            VPIN score (0.0 to 1.0). >0.4 indicates Toxic/Informed Flow.
+        """
+        buy_vol = sum(self.buy_volume_buffer) if self.buy_volume_buffer else 0
+        sell_vol = sum(self.sell_volume_buffer) if self.sell_volume_buffer else 0
+        total_vol = buy_vol + sell_vol
+        
+        if total_vol <= 0:
+            return 0.0
+            
+        return abs(buy_vol - sell_vol) / total_vol
+
+    def calculate_reynolds_number(self, spread_points: float, point_value: float = 0.01) -> float:
+        """
+        [THE PHYSICIST] Calculate Reynolds Number (Re) for Phase Transition detection.
+        Re = (Volume * Volatility) / Viscosity(Spread)
         
         Args:
-            tick: Current tick data
-            point_value: Point value for pressure calculation
+            spread_points: Current spread in points
+            point_value: value of a point
             
         Returns:
-            Combined dictionary with all metrics
+            Re score. High Re (>1000) = Turbulent (Breakout). Low Re = Laminar (Range).
+        """
+        if spread_points <= 0 or not self.ticks:
+            return 0.0
+            
+        # 1. Characteristic Volume (Velocity)
+        # Using ticks/sec as proxy for flow velocity u
+        duration = self.ticks[-1][1] - self.ticks[0][1]
+        if duration <= 0: duration = 0.001
+        velocity = len(self.ticks) / duration
+        
+        # 2. Characteristic Length (Volatility/Turbulence)
+        # StdDev of prices in window
+        prices = [p[0] for p in self.ticks]
+        if len(prices) > 2:
+            import numpy as np
+            volatility = np.std(prices) / point_value
+        else:
+            volatility = 0.0
+            
+        # 3. Viscosity (Spread)
+        viscosity = spread_points
+        
+        # Re = (Velocity * Volatility) / Viscosity
+        # Scaling factor 100 to make numbers readable (e.g., 0-5000)
+        re = (velocity * volatility * 100) / viscosity
+        
+        return float(re)
+
+    def calculate_navier_stokes_pressure(self, order_flow_imbalance: float, velocity: float) -> float:
+        """
+        [THE PHYSICIST] Calculate Net Force (Pressure Gradient).
+        F = Mass * Acceleration
+        Approximation: Force = Imbalance * Velocity
+        """
+        return order_flow_imbalance * velocity
+
+    def calculate_reaction_rate(self) -> float:
+        """
+        [THE CHEMIST] Calculate Liquidity Consumption Rate.
+        Reaction Rate = Trade Frequency / Time
+        (Simple proxy: Ticks per second, which is roughly velocity)
+        """
+        if len(self.ticks) < 2: 
+            return 0.0
+            
+        duration = self.ticks[-1][1] - self.ticks[0][1]
+        if duration <= 0: return 0.0
+        
+        return len(self.ticks) / duration
+
+    def get_combined_analysis(self, tick, point_value=0.01):
+        """
+        Get all Physics & Chemistry metrics in one call.
         """
         pressure = self.get_pressure_metrics(point_value)
         order_flow = self.analyze_order_flow(tick)
         
-        # Combine both analyses
+        # Extract needed data for Physics
+        ask = tick.get('ask', 0)
+        bid = tick.get('bid', 0)
+        spread = (ask - bid) if (ask > 0 and bid > 0) else 0.0001
+        spread_points = spread / point_value
+        
+        # [THE PHYSICIST]
+        re = self.calculate_reynolds_number(spread_points, point_value)
+        ns_pressure = self.calculate_navier_stokes_pressure(
+            order_flow['order_flow_imbalance'], 
+            pressure['velocity']
+        )
+        
+        # [THE CHEMIST]
+        vpin = self.calculate_vpin()
+        reaction = self.calculate_reaction_rate()
+        
         combined = {
             **pressure,
-            **order_flow
+            **order_flow,
+            'physics': {
+                'reynolds_number': re,
+                'navier_stokes_force': ns_pressure,
+                'regime': 'TURBULENT' if re > 500 else 'LAMINAR' # Threshold to be tuned
+            },
+            'chemistry': {
+                'vpin': vpin,
+                'reaction_rate': reaction,
+                'is_toxic': vpin > 0.4
+            }
         }
         
         return combined
