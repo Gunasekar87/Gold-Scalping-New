@@ -1147,7 +1147,7 @@ class RiskManager:
             
             # === ZERO LATENCY EXECUTION ===
             # Execute hedge immediately
-            logger.info(f"[HEDGE] EXECUTING {next_action} {hedge_lot:.2f} lots NOW...")
+            logger.info(f"[HEDGE] EXECUTING {next_action} {hedge_lot:.3f} lots NOW...")
 
             # [WICK INTELLIGENCE] Check for wick rejection zones before hedging
             try:

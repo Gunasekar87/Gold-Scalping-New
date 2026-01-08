@@ -816,7 +816,7 @@ class MT5Adapter(BrokerAdapter):
         # Normalize to volume_step.
         # Default is ROUND-DOWN (safer): never increases exposure vs requested_lot.
         # Override with AETHER_LOT_NORMALIZE_MODE=nearest if you prefer standard rounding.
-        mode = str(os.getenv("AETHER_LOT_NORMALIZE_MODE", "down")).strip().lower()
+        mode = str(os.getenv("AETHER_LOT_NORMALIZE_MODE", "nearest")).strip().lower()
 
         epsilon = 1e-12  # protect against floating point edge cases
         if mode in ("nearest", "round", "standard"):
