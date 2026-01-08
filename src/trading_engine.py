@@ -2552,9 +2552,9 @@ class TradingEngine:
                         # Strong validation - only log in debug
                         logger.debug(f"[SIGNAL] ✅ Strong validation ({validation.score:.0%})")
                         reason = f"{reason} | Validated ({validation.score:.0%})"
-                    elif validation.score < 0.30:
+                    elif validation.score < 0.25:
                         # CRITICAL: Block very weak signals to prevent bad trades
-                        # [ADJUSTMENT] Lowered to 30% to allow defensive entries in CHAOS
+                        # [ADJUSTMENT] Lowered to 25% to allow defensive entries in CHAOS
                         logger.warning(
                             f"[SIGNAL] 🚫 BLOCKED: Validation too weak ({validation.score:.0%}). "
                             f"Failed factors: {', '.join(validation.failed_factors[:3])}"

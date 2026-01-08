@@ -41,9 +41,9 @@ class NewsFilter:
             return False, "US Market Open Volatility Window (13:25-13:35 UTC)"
             
         # 3. [REALIST] BLOCK ASIAN SESSION LOW LIQUIDITY (00:00 - 06:00 UTC)
-        # Gold spreads are often elevated and movement is minimal/random.
-        if 0.0 <= current_hour < 6.0:
-            return False, "Asian Session Low Liquidity (00:00-06:00 UTC)"
+        # [USER REQUEST] ENABLED 24/7 TRADING - REMOVED RESTRICTION
+        # if 0.0 <= current_hour < 6.0:
+        #     return False, "Asian Session Low Liquidity (00:00-06:00 UTC)"
             
         return True, "Safe to Trade"
 
