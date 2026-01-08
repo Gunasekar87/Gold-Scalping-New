@@ -2048,6 +2048,13 @@ class TradingEngine:
                 logger.info(f"[ZONE] RECOVERY EXECUTED for {symbol}")
                 # Force immediate update of position cache to reflect new hedge
                 # This prevents "Ghost Trades" where the bot doesn't know about the new hedge
+                
+                # [CRITICAL UPDATE v7.0.9] Pipeline Fusion: Lock Signal Wire
+                # Prevent "Hunting Mode" from firing fresh entries while Hedge is settling
+                if self.entry_cooldowns is not None:
+                     self.entry_cooldowns[symbol] = time.time()
+                     logger.info(f"[PIPELINE COMMIT] Hedge executed -> Locked Initial Entry Cooldown for {symbol}")
+
                 await asyncio.sleep(0.2) # Give broker a moment
                 all_positions = self.broker.get_positions()
                 if all_positions:

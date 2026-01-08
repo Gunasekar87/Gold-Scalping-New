@@ -202,18 +202,51 @@ class MT5Adapter(BrokerAdapter):
             request["action"] = mt5.TRADE_ACTION_DEAL
             logger.info(f"[MT5] Sending order: {action} {order_type} {symbol} {normalized_volume} lots @ {request['price']:.5f} | SL={sl:.5f} TP={tp:.5f}")
         
-        result = mt5.order_send(request)
-        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-            logger.info(f"[MT5] [OK] Order executed successfully - Ticket: {result.order} | Retcode: {result.retcode}")
-            return {"ticket": result.order, "retcode": result.retcode}
-        else:
-            # Log detailed error information
-            if result:
-                logger.error(f"[MT5] [FAILED] Order failed: retcode={result.retcode}, comment={result.comment}")
-                logger.error(f"[MT5] Request: action={action}, symbol={symbol}, volume={normalized_volume}, type={order_type}, ticket={ticket}")
+        # Retry loop for robust execution
+        max_retries = 3
+        result = None
+        
+        for attempt in range(max_retries):
+            # Refresh price on retries (avoid Requotes/Invalid Price)
+            # Only refresh for OPEN/CLOSE/HEDGE where price matters (not SLTP modification)
+            if attempt > 0 and (action == "OPEN" or action == "CLOSE" or action == "HEDGE"): 
+                 tick = mt5.symbol_info_tick(symbol)
+                 if tick:
+                     new_price = tick.ask if mt5_type == mt5.ORDER_TYPE_BUY else tick.bid
+                     request["price"] = new_price
+            
+            result = mt5.order_send(request)
+            
+            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                logger.info(f"[MT5] [OK] Order executed successfully - Ticket: {result.order} | Retcode: {result.retcode}")
+                return {"ticket": result.order, "retcode": result.retcode}
+            
+            # Retry on Connection Error (10031), Requote (10004), No Quotes (10021), Trade Timeout (10036), Off Quotes (10018)
+            # 10031 = No Connection
+            # 10004 = Requote
+            # 10015 = Invalid Price (Refresh helps)
+            # 10018 = Market Closed (Wait?) -> No, actually 10018 is fatal usually. But 10008 (Order Place) might retry.
+            # We stick to connectivity/pricing errors.
+            elif result and result.retcode in [10004, 10031, 10021, 10036, 10015, 10016]: 
+                 wait_time = 0.5 * (attempt + 1)
+                 if result.retcode == 10031: 
+                     wait_time = 2.0 * (attempt + 1) # Wait longer for connection
+                     
+                 logger.warning(f"[MT5] Retry {attempt+1}/{max_retries}: Order failed with {result.retcode} ({result.comment}). Waiting {wait_time}s...")
+                 time.sleep(wait_time)
+                 continue
+            
             else:
-                logger.error(f"[MT5] Order send returned None. Last error: {mt5.last_error()}")
-            return {"ticket": None, "retcode": result.retcode if result else -1}
+                # Fatal error (e.g. Invalid Volume, No Money, Market Closed) - Do not retry
+                break
+                
+        # Final Failure Log (if all retries failed or fatal error)
+        if result:
+            logger.error(f"[MT5] [FAILED] Order failed: retcode={result.retcode}, comment={result.comment}")
+            logger.error(f"[MT5] Request: action={action}, symbol={symbol}, volume={normalized_volume}, type={order_type}, ticket={ticket}")
+        else:
+            logger.error(f"[MT5] Order send returned None. Last error: {mt5.last_error()}")
+        return {"ticket": None, "retcode": result.retcode if result else -1}
 
     def get_positions(self, symbol: Optional[str] = None) -> Optional[list]:
         positions = mt5.positions_get(symbol=symbol) if symbol else mt5.positions_get()
