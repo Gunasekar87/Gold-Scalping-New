@@ -767,6 +767,48 @@ class TradingEngine:
         # Check market data manager conditions
         return self.market_data.validate_market_conditions(symbol, tick)
 
+    def _validate_physics_conditions(self, action: str, regime, pressure_metrics: Dict, tick: Dict) -> Tuple[bool, str]:
+        """
+        Validates trade against 'Unified Field Theory' physics:
+        1. Reynolds Number (Turbulence) -> Block if extreme turbulence
+        2. VPIN (Toxicity) -> Block if toxic flow detected
+        3. Entropy -> Already handled by regime detection
+        
+        Args:
+            action: Trade action ("BUY" or "SELL")
+            regime: Market regime from RegimeDetector
+            pressure_metrics: Physics/chemistry metrics from TickPressureAnalyzer
+            tick: Current tick data
+            
+        Returns:
+            Tuple of (is_valid, reason)
+        """
+        if not pressure_metrics:
+            return True, "No Physics Data"
+
+        try:
+            # 1. REYNOLDS NUMBER (Turbulence)
+            physics = pressure_metrics.get('physics', {})
+            reynolds = physics.get('reynolds_number', 0.0)
+            
+            # If Re > 5000 (Extreme Turbulence), standard directional logic fails
+            if reynolds > 5000:
+                return False, f"Extreme Turbulence (Re={reynolds:.0f})"
+
+            # 2. VPIN (Toxicity)
+            chemistry = pressure_metrics.get('chemistry', {})
+            vpin = chemistry.get('vpin', 0.0)
+            
+            # If VPIN > 0.7 (Very Toxic Flow), avoid providing liquidity
+            if vpin > 0.7:
+                return False, f"Toxic Flow Detected (VPIN={vpin:.2f})"
+
+            return True, "Physics OK"
+
+        except Exception as e:
+            logger.error(f"[PHYSICS] Validation error: {e}")
+            return True, "Physics Error (Default Allow)"
+
     def calculate_position_size(self, signal: TradeSignal, account_info: Dict,
                               strategist, shield, ppo_guardian=None, 
                               atr_value=0.001, trend_strength=0.0) -> Tuple[float, str]:
