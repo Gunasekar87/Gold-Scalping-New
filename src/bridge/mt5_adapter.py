@@ -431,6 +431,16 @@ class MT5Adapter(BrokerAdapter):
                 logger.error(f"Invalid position data for close: {e}")
                 return {"ticket": -1, "retcode": -1, "comment": f"Invalid data: {e}"}
 
+            # [ROBUSTNESS] Verify position exists in broker (prevent 10013 loop)
+            # If not found, assume it's already closed manually or by SL/TP
+            if not mt5.positions_get(ticket=ticket):
+                logger.warning(f"[CLOSE SKIP] Position {ticket} not found in broker. Marking as CLOSED.")
+                return {
+                    "ticket": ticket, 
+                    "retcode": mt5.TRADE_RETCODE_DONE, 
+                    "comment": "Already Closed (Ghost)"
+                }
+
             # Optional override for the CLOSE comment (not the original position comment).
             # We keep this short because MT5 imposes strict comment length limits.
             close_comment = None
