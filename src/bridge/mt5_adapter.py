@@ -18,6 +18,7 @@ class MT5Adapter(BrokerAdapter):
         self.login = int(login) if login else None
         self.password = password
         self.server = server
+        self._resolved_symbols = {}  # Cache for fuzzy symbol matching
 
         # Persistent close executor to avoid per-batch threadpool startup overhead.
         self._close_executor: Optional[ThreadPoolExecutor] = None
@@ -79,7 +80,50 @@ class MT5Adapter(BrokerAdapter):
                 
         return True
 
+    def _resolve_symbol(self, requested_symbol: str) -> Optional[str]:
+        """
+        Fuzzy match symbol to handle broker suffixes (e.g. 'XAUUSD' -> 'XAUUSD.m').
+        Caches the result for performance.
+        """
+        if requested_symbol in self._resolved_symbols:
+            return self._resolved_symbols[requested_symbol]
+
+        # 1. Try exact match first (Fast)
+        if mt5.symbol_select(requested_symbol, True):
+            self._resolved_symbols[requested_symbol] = requested_symbol
+            return requested_symbol
+
+        # 2. Try common suffixes
+        suffixes = [".m", ".pro", "+", ".ecn", "_i", ".r", ".s"]
+        for suffix in suffixes:
+            candidate = f"{requested_symbol}{suffix}"
+            if mt5.symbol_select(candidate, True):
+                logger.info(f"[MT5] Auto-corrected symbol: {requested_symbol} -> {candidate}")
+                self._resolved_symbols[requested_symbol] = candidate
+                return candidate
+
+        # 3. Last Resort: Iterate visible symbols (Slow)
+        logger.warning(f"[MT5] Symbol '{requested_symbol}' not found. Searching visible symbols...")
+        symbols = mt5.symbols_get()
+        if symbols:
+            req_clean = requested_symbol.lower()
+            for s in symbols:
+                if req_clean in s.name.lower():
+                    # If confirmed with select
+                    if mt5.symbol_select(s.name, True):
+                        logger.info(f"[MT5] Auto-corrected symbol (Fuzzy): {requested_symbol} -> {s.name}")
+                        self._resolved_symbols[requested_symbol] = s.name
+                        return s.name
+
+        return None
+
     def get_market_data(self, symbol: str, timeframe: str, limit: int) -> list:
+        # Use resolved symbol
+        actual_symbol = self._resolve_symbol(symbol)
+        if not actual_symbol:
+            logger.warning(f"[MT5] Cannot fetch history: Symbol {symbol} not found")
+            return []
+
         tf_map = {
             "M1": mt5.TIMEFRAME_M1,
             "M5": mt5.TIMEFRAME_M5,
@@ -90,7 +134,7 @@ class MT5Adapter(BrokerAdapter):
             "D1": mt5.TIMEFRAME_D1,
         }
         mt5_tf = tf_map.get(timeframe, mt5.TIMEFRAME_M1)
-        rates = mt5.copy_rates_from_pos(symbol, mt5_tf, 0, limit)
+        rates = mt5.copy_rates_from_pos(actual_symbol, mt5_tf, 0, limit)
         if rates is None or len(rates) == 0:
             return []
         
@@ -109,16 +153,35 @@ class MT5Adapter(BrokerAdapter):
         return data
 
     def get_current_price(self, symbol: str) -> float:
-        tick = mt5.symbol_info_tick(symbol)
+        actual_symbol = self._resolve_symbol(symbol)
+        if not actual_symbol: return 0.0
+        tick = mt5.symbol_info_tick(actual_symbol)
         return tick.bid if tick else 0.0
 
     def get_tick(self, symbol: str) -> Dict:
-        # Ensure symbol is selected in Market Watch
-        if not mt5.symbol_select(symbol, True):
-            logger.warning(f"Failed to select symbol {symbol} in Market Watch")
+        # 1. Check connection
+        terminal_info = mt5.terminal_info()
+        if not terminal_info:
+            logger.warning("[MT5] Terminal info unavailable. Attempting reconnect...")
+            if not self.connect(): return None
+        elif not terminal_info.connected:
+            logger.warning("[MT5] Terminal disconnected. Attempting reconnect...")
+            if not self.connect(): return None
+
+        # 2. Resolve Symbol (handles suffixes like XAUUSD.m)
+        actual_symbol = self._resolve_symbol(symbol)
+        if not actual_symbol:
+             # Already logged warning in _resolve_symbol
+             return None
+
+        # 3. Ensure symbol is selected in Market Watch
+        if not mt5.symbol_select(actual_symbol, True):
+            err = mt5.last_error()
+            logger.warning(f"Failed to select symbol {actual_symbol} in Market Watch (Error: {err})")
             return None
             
-        tick = mt5.symbol_info_tick(symbol)
+        # 4. Fetch Tick
+        tick = mt5.symbol_info_tick(actual_symbol)
         if tick:
             return {
                 'bid': tick.bid,
@@ -126,6 +189,8 @@ class MT5Adapter(BrokerAdapter):
                 'time': tick.time,
                 'flags': tick.flags
             }
+        
+        logger.warning(f"[MT5] symbol_info_tick returned None for {actual_symbol} (Error: {mt5.last_error()})")
         return None
 
     def execute_order(self, symbol, action, volume, order_type, price=None, sl=0.0, tp=0.0, magic=0, comment="", ticket=None, **kwargs) -> Dict:
@@ -231,7 +296,12 @@ class MT5Adapter(BrokerAdapter):
                  wait_time = 0.5 * (attempt + 1)
                  if result.retcode == 10031: 
                      wait_time = 2.0 * (attempt + 1) # Wait longer for connection
-                     
+                     logger.warning(f"[MT5] ⚠️ Connection lost (10031). Attempting re-initialization...")
+                     try:
+                        mt5.initialize()
+                     except Exception as e:
+                        logger.error(f"[MT5] Re-init failed: {e}")
+
                  logger.warning(f"[MT5] Retry {attempt+1}/{max_retries}: Order failed with {result.retcode} ({result.comment}). Waiting {wait_time}s...")
                  time.sleep(wait_time)
                  continue

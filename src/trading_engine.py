@@ -947,9 +947,12 @@ class TradingEngine:
             Tuple of (can_enter, reason)
         """
         # Check global trade cooldown
-        time_since_last_trade = time.time() - self.last_trade_time
-        if time_since_last_trade < self.config.global_trade_cooldown:
-            return False, f"Global cooldown: {time_since_last_trade:.1f}s < {self.config.global_trade_cooldown}s"
+        # [CRITICAL FIX] Bypass cooldown for Recovery Trades (Hedges/DCA).
+        # We cannot wait 30s when the house is on fire.
+        if not is_recovery_trade:
+             time_since_last_trade = time.time() - self.last_trade_time
+             if time_since_last_trade < self.config.global_trade_cooldown:
+                 return False, f"Global cooldown: {time_since_last_trade:.1f}s < {self.config.global_trade_cooldown}s"
 
         # Check account equity
         equity = account_info.get('equity', 0)
@@ -2664,9 +2667,15 @@ class TradingEngine:
                 last_entry_ts = self.entry_cooldowns.get(symbol, 0)
                 time_since_last = time.time() - last_entry_ts
                 
-                if time_since_last < 60:
+                # [FIX] Use Configurable Cooldown (was hardcoded 60s)
+                # For scalping, 5.0s is usually sufficient to prevent machine-gunning
+                cooldown_limit = self.config.global_trade_cooldown
+                
+                if time_since_last < cooldown_limit:
                     # Cooldown active - block this entry
-                    logger.debug(f"[COOLDOWN] Entry blocked for {symbol}. Last entry was {time_since_last:.1f}s ago.")
+                    # Only log if it's not super spammy (e.g. every 5s)
+                    if time_since_last > 1.0: 
+                         logger.debug(f"[COOLDOWN] Entry blocked for {symbol}. Last entry was {time_since_last:.1f}s ago (limit: {cooldown_limit}s).")
                     return
                 
                 # Reserve this entry slot immediately (atomic)

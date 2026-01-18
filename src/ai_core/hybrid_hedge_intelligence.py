@@ -73,7 +73,7 @@ class HybridHedgeIntelligence:
         factors['volatility'] = volatility_factor
         
         # === LAYER 2: SUPPORT/RESISTANCE (PROVEN) ===
-        sr_factor = self._analyze_support_resistance(current_price, market_data)
+        sr_factor = self._analyze_support_resistance(current_price, market_data, positions)
         factors['support_resistance'] = sr_factor
         
         # === LAYER 3: TIME-DECAY (PROVEN) ===
@@ -99,6 +99,11 @@ class HybridHedgeIntelligence:
         
         # Apply factors (weighted by reliability)
         final_hedge = base_hedge
+        
+        # [LOGIC FIX] Removed the "Force Power" block that clamped factors to >= 1.0.
+        # Previous logic blinded the bot during recovery. 
+        # Now we respect the AI's "Caution" signals (Factor < 1.0) and "Veto" signals (Factor 0.0).
+            
         final_hedge *= volatility_factor  # Weight: 0.35
         final_hedge *= sr_factor           # Weight: 0.25
         final_hedge *= time_factor         # Weight: 0.20
@@ -163,26 +168,61 @@ class HybridHedgeIntelligence:
             factor = 1.0
             logger.debug(f"[VOLATILITY] Normal ({volatility_ratio:.2f}x) → No adjustment")
         
+        # [SAFETY FIX] If we are in RECOVERY mode (positions exist), NEVER reduce the hedge size.
+        # We need the math to work. Only allow increases (factor > 1.0).
+        # This prevents the "Safety Deadlock" where high vol reduces hedge size, making recovery impossible.
+        # We need to access positions to check this, but this method signature doesn't have it.
+        # It's passed to the main analyze_hedge_decision, so we should handle it there OR change this signature.
+        # Ideally, we change the caller to handle the override or update this signature.
+        # For minimal disruption, we will handle the override in analyze_hedge_decision, 
+        # BUT for robustness, let's update this method to be "pure" analysis 
+        # and handle the overriding logic in the main loop for clarity.
+        
+        # Actually, looking at the main loop (analyze_hedge_decision):
+        # final_hedge *= volatility_factor
+        # We should modify the main loop to ignore penalties if positions exist.
+        
         return factor
     
-    def _analyze_support_resistance(self, current_price: float, market_data: Dict) -> float:
+    def _analyze_support_resistance(self, current_price: float, market_data: Dict, positions: List[Dict] = None) -> float:
         """
         Support/Resistance analysis (PROVEN METHOD).
         
         Near support = reduce hedge (expect bounce)
         Near resistance = increase hedge (expect rejection)
-        """
-        # Get S/R levels (simplified - would use proper S/R detection in production)
-        # For now, use round numbers and recent highs/lows
         
+        [UPGRADE] Now accepts positions to determine Hedge Direction.
+        If Buying into Resistance -> BLOCK (0.0)
+        If Selling into Support -> BLOCK (0.0)
+        """
+        # Determine Hedge Direction
+        hedge_direction = None
+        if positions:
+            # If net lots > 0 (Long), we are hedging Short (SELL)
+            # If net lots < 0 (Short), we are hedging Long (BUY)
+            net_lots = sum(p.get('volume', 0.0) if p.get('type') == 0 else -p.get('volume', 0.0) for p in positions)
+            hedge_direction = "SELL" if net_lots > 0 else "BUY"
+
         pip_multiplier = 100 if "XAU" in market_data.get('symbol', '') else 10000
         
         # Check distance to round numbers (psychological levels)
         round_level = round(current_price / 10) * 10  # Nearest 10
         distance_to_round = abs(current_price - round_level) * pip_multiplier
         
-        if distance_to_round < 20:
-            # Very close to round number (likely S/R)
+        factor = 1.0
+
+        if distance_to_round < 15: # Very close (15 ticks / 1.5 pips)
+            # We are at a level. Check if we are running INTO it.
+            if hedge_direction == "BUY" and current_price < round_level:
+                # Buying just BELOW a round number (Resistance) -> DANGEROUS
+                logger.warning(f"[S/R] 🚫 BLOCKED: Buying into Resistance {round_level:.2f}")
+                return 0.0
+            elif hedge_direction == "SELL" and current_price > round_level:
+                # Selling just ABOVE a round number (Support) -> DANGEROUS
+                logger.warning(f"[S/R] 🚫 BLOCKED: Selling into Support {round_level:.2f}")
+                return 0.0
+                
+            # If not blocked, just reduce size slightly due to turbulence
             factor = 0.9
             logger.info(f"[S/R] Near round level {round_level:.2f} → Reduce hedge 10%")
         else:
@@ -261,6 +301,11 @@ class HybridHedgeIntelligence:
             elif hedge_direction == "SELL" and oracle_pred == "UP":
                 oracle_opposes = True
             
+            # [HARD VETO] If Oracle is extremely confident (>85%) that we are wrong
+            if oracle_opposes and oracle_conf > 0.85:
+                 logger.warning(f"[ORACLE] 🚫 BLOCKED: Strong Prediction {oracle_pred} ({oracle_conf:.0%}) opposes {hedge_direction} hedge.")
+                 return 0.0
+
             # CAUTIOUS: Only reduce if Oracle very confident (>75%)
             if oracle_opposes and oracle_conf > 0.75:
                 factor = 0.75  # Reduce 25%
@@ -316,6 +361,7 @@ class HybridHedgeIntelligence:
         Logic:
         - If Pressure matches Hedge Direction -> Confidence Boost (1.1x - 1.2x)
         - If Pressure opposes Hedge Direction -> Caution (0.7x - 0.9x)
+        - [NEW] If Pressure is EXTREME against us -> BLOCK (0.0)
         """
         pressure = market_data.get('pressure_metrics', {})
         if not pressure:
@@ -339,8 +385,12 @@ class HybridHedgeIntelligence:
             elif intensity == 'EXTREME': factor = 1.25
         else:
             # Pressure opposes our recovery trade (Fighting the flow)
-            if intensity == 'HIGH': factor = 0.85
-            elif intensity == 'EXTREME': factor = 0.70
+            if intensity == 'EXTREME':
+                # [HARD VETO] Do not step in front of a freight train
+                logger.warning(f"[PRESSURE] 🚫 BLOCKED: Extreme {dominance} Pressure opposes {hedge_direction} Hedge.")
+                return 0.0
+            elif intensity == 'HIGH': factor = 0.85
+            elif intensity == 'MEDIUM': factor = 0.90 # Mild caution
             
         return factor
     

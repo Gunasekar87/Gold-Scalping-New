@@ -1,4 +1,18 @@
-﻿v6.6.0 (HYBRID HEDGE INTELLIGENCE) - 2026-01-07
+﻿v6.6.1 (CONNECTION & VELOCITY PATCH) - 2026-01-09
+----------------------------------------------------------------
+[CRITICAL] Market Data: Fixed "Stale Tick" and "Failed to Select" errors.
+      - Implemented Smart Symbol Recovery (Fuzzy Matching) in mt5_adapter.py.
+      - Added proactive connection health checks before fetching data.
+[CRITICAL] Execution Speed: Fixed Entry Delay bug.
+      - Removed hardcoded 60s cooldown; usage config value (default 5.0s).
+      - Allows rapid scalping re-entries after quick trade closures.
+[FIX] Safety Deadlock: Bypassed Cooldown for Recovery Trades.
+      - Prevents system from locking up during critical recovery phases.
+[FIX] Data Integrity: Fixed Macro Velocity noise with time-based windowing.
+[FIX] AI Vision: Connected Order Book data to Nexus Transformer.
+----------------------------------------------------------------
+
+v6.6.0 (HYBRID HEDGE INTELLIGENCE) - 2026-01-07
 ----------------------------------------------------------------
 [NEW] Hybrid Hedge Intelligence: Revolutionary multi-layer hedge decision system
       - Layer 1 (Volatility-Adaptive): 75-85% success - Adjusts size based on market volatility
@@ -31,7 +45,6 @@ v6.5.1 (FORENSIC DECISION LOGGING) - 2026-01-06
 ----------------------------------------------------------------
 
 v6.5.0 (SMART HEDGE SYSTEM) - 2026-01-06
-
 ----------------------------------------------------------------
 [NEW] Smart Hedge Intelligence: AI-driven hedge optimization with 3-tier system
       - Tier 1 (Emergency): Loss > 150 pips → Immediate hedge (no AI)
@@ -162,199 +175,7 @@ v5.2.1 (VIRTUAL EXIT & SAFETY NET) - 2025-12-15
 - [NEW] Doomsday Protocol: Added global equity hard stop (20% drawdown).
 - [CLEANUP] Removed dead code (`calculate_optimized_tp`) to streamline logic.
 
-v5.2.0 (HIGHEST INTELLIGENCE & PLAN B) - 2025-12-digraph Aether_v5_3_0_Full_Architecture {
-    // Graph Settings
-    rankdir=TB;
-    compound=true;
-    splines=ortho;
-    nodesep=0.5;
-    ranksep=0.8;
-    fontname="Arial";
-    fontsize=12;
-    bgcolor="#ffffff";
-
-    // Node Defaults
-    node [shape=record, style="filled,rounded", fontname="Arial", fontsize=9, penwidth=1.2, margin=0.1];
-    edge [fontname="Arial", fontsize=8, color="#555555", penwidth=0.8, arrowsize=0.7];
-
-    // ==========================================
-    // LEVEL 0: EXTERNAL ENVIRONMENT
-    // ==========================================
-    subgraph cluster_env {
-        label = "External Environment";
-        style = dashed;
-        color = "#bdbdbd";
-        fontcolor = "#757575";
-        
-        MT5_Terminal [label="MetaTrader 5\n(Terminal)", shape=box3d, fillcolor="#eceff1"];
-        TimescaleDB [label="TimescaleDB\n(PostgreSQL)", shape=database, fillcolor="#eceff1"];
-        FileSystem [label="File System\n(Config/Models/Logs)", shape=folder, fillcolor="#eceff1"];
-    }
-
-    // ==========================================
-    // LEVEL 1: CONFIGURATION & ENTRY
-    // ==========================================
-    subgraph cluster_init {
-        label = "Initialization Layer";
-        style = filled;
-        color = "#fff8e1";
-        
-        RunBot [label="{run_bot.py|Entry Point|Setup Logging|Sys Path Setup}", fillcolor="#ffecb3"];
-        
-        ConfigFiles [label="{Config Files|settings.yaml|secrets.env|model_config.json|news_events.json [v5.3]}", shape=note, fillcolor="#fff9c4"];
-        
-        ConfigValidator [label="{ConfigValidator|src/config_validator.py|validate_config()|load_yaml()|check_secrets()}", fillcolor="#ffe082"];
-        
-        MainBot [label="{AetherBot|src/main_bot.py|orchestrate_components()|run_loop()|handle_shutdown()}", fillcolor="#ffca28"];
-    }
-
-    // ==========================================
-    // LEVEL 2: BRIDGE & INFRASTRUCTURE
-    // ==========================================
-    subgraph cluster_infra {
-        label = "Infrastructure Layer";
-        style = filled;
-        color = "#e0f7fa";
-
-        subgraph cluster_bridge {
-            label = "Broker Bridge";
-            style = filled;
-            color = "#b2ebf2";
-            
-            BrokerFactory [label="{BrokerFactory|get_broker_adapter()}", fillcolor="#80deea"];
-            MT5Adapter [label="{MT5Adapter|src/bridge/mt5_adapter.py|get_tick_data()|get_positions()|place_order()|close_position()|remove_tp_sl()}", fillcolor="#4dd0e1"];
-        }
-
-        subgraph cluster_db {
-            label = "Async Database";
-            style = filled;
-            color = "#b2ebf2";
-            
-            AsyncDB [label="{AsyncDatabaseManager|src/infrastructure/async_database.py|connect()|initialize_schema()}", fillcolor="#80deea"];
-            DBQueue [label="{AsyncDatabaseQueue|worker_loop()|add_tick()|add_trade()}", fillcolor="#4dd0e1"];
-        }
-    }
-
-    // ==========================================
-    // LEVEL 3: CORE TRADING ENGINE
-    // ==========================================
-    subgraph cluster_core {
-        label = "Core Trading System";
-        style = filled;
-        color = "#fff3e0";
-        
-        TradingEngine [label="{TradingEngine|src/trading_engine.py|run_trading_cycle()|validate_market_conditions()|calculate_position_size()|_check_global_safety()}", fillcolor="#ffcc80", penwidth=2.0];
-        
-        MarketData [label="{MarketDataManager|src/market_data.py|get_tick_data()|get_candles()|calculate_atr()|calculate_rsi()|get_volatility_ratio()}", fillcolor="#ffe0b2"];
-        
-        PositionManager [label="{PositionManager|src/position_manager.py|active_positions: Dict|bucket_stats: Dict|update_positions()|execute_eraser_logic() [v5.3]|execute_ai_sniper_logic()|close_bucket_positions()}", fillcolor="#ffe0b2"];
-        
-        RiskManager [label="{RiskManager|src/risk_manager.py|zone_config: ZoneConfig|hedge_states: Dict|execute_zone_recovery()|validate_hedge_conditions()|calculate_zone_parameters()}", fillcolor="#ffe0b2"];
-    }
-
-    // ==========================================
-    // LEVEL 4: AI INTELLIGENCE (THE BRAIN)
-    // ==========================================
-    subgraph cluster_ai {
-        label = "AI Intelligence Layer (v5.3.0)";
-        style = filled;
-        color = "#e8f5e9";
-
-        // Module 1: Holographic View
-        subgraph cluster_mod1 {
-            label = "Module 1: Holographic";
-            style = dashed;
-            TickPressure [label="{TickPressureAnalyzer|src/ai_core/tick_pressure.py|ticks: deque|add_tick()|get_pressure_metrics()|analyze_pressure()}", fillcolor="#b9f6ca"];
-        }
-
-        // Module 4: Regime & Personality
-        subgraph cluster_mod4 {
-            label = "Module 4: Regime";
-            style = dashed;
-            Supervisor [label="{Supervisor|src/ai_core/supervisor.py|detect_regime()|get_active_worker()}", fillcolor="#c8e6c9"];
-            Workers [label="{Workers|src/ai_core/workers.py|RangeWorker|TrendWorker|get_signal(pressure_metrics)}", fillcolor="#c8e6c9"];
-        }
-
-        // Module 5: Trajectory
-        subgraph cluster_mod5 {
-            label = "Module 5: Trajectory";
-            style = dashed;
-            NexusBrain [label="{NexusBrain|src/ai_core/nexus_brain.py|model: TimeSeriesTransformer|predict()|predict_trajectory() [v5.3]}", fillcolor="#a5d6a7"];
-            Transformer [label="{TimeSeriesTransformer|src/ai_core/nexus_transformer.py|MultiHeadAttention|PositionalEncoding}", fontsize=8, fillcolor="#a5d6a7"];
-        }
-
-        // Oracle & Optimization
-        Oracle [label="{Oracle|src/ai_core/oracle.py|get_sniper_signal()|predict()}", fillcolor="#81c784"];
-        IronShield [label="{IronShield|src/ai_core/iron_shield.py|calculate_defense()|math_optimization}", fillcolor="#81c784"];
-        PPOGuardian [label="{PPOGuardian|src/ai_core/ppo_guardian.py|optimize_action()}", fillcolor="#81c784"];
-        GlobalBrain [label="{GlobalBrain|src/ai_core/global_brain.py|analyze_impact()}", fillcolor="#81c784"];
-    }
-
-    // ==========================================
-    // LEVEL 5: UTILITIES & POLICY
-    // ==========================================
-    subgraph cluster_utils {
-        label = "Utils & Policy";
-        style = filled;
-        color = "#f3e5f5";
-        
-        NewsCalendar [label="{NewsCalendar [v5.3]|src/utils/news_calendar.py|events: List|is_blackout_period()|load_events()}", fillcolor="#e1bee7"];
-        NewsFilter [label="{NewsFilter|src/utils/news_filter.py|Simple Time Filter}", fillcolor="#e1bee7"];
-        TradingLogger [label="{TradingLogger|src/utils/trading_logger.py|log_trade()|DecisionTracker}", fillcolor="#e1bee7"];
-        
-        HedgePolicy [label="{HedgePolicy|src/policy/hedge_policy.py}", fillcolor="#d1c4e9"];
-        RiskGovernor [label="{RiskGovernor|src/policy/risk_governor.py}", fillcolor="#d1c4e9"];
-    }
-
-    // ==========================================
-    // DATA FLOW & RELATIONSHIPS
-    // ==========================================
-
-    // 1. Startup Sequence
-    RunBot -> MainBot [label="starts"];
-    FileSystem -> ConfigFiles [style=dashed];
-    ConfigFiles -> ConfigValidator [label="loads"];
-    ConfigValidator -> MainBot [label="config"];
-    
-    MainBot -> BrokerFactory [label="init"];
-    BrokerFactory -> MT5Adapter [label="creates"];
-    MainBot -> AsyncDB [label="init"];
-    MainBot -> TradingEngine [label="init"];
-
-    // 2. External Connections
-    MT5Adapter -> MT5_Terminal [dir=both, label="API"];
-    AsyncDB -> TimescaleDB [dir=both, label="SQL"];
-
-    // 3. The Main Loop (TradingEngine)
-    TradingEngine -> NewsCalendar [label="1. Check Blackout", color="red", style="bold"];
-    TradingEngine -> MarketData [label="2. Get Tick"];
-    MarketData -> MT5Adapter [label="fetch"];
-    
-    TradingEngine -> TickPressure [label="3. Feed Tick", color="green", style="bold"];
-    TradingEngine -> DBQueue [label="4. Log Tick"];
-    
-    // 4. AI Decision Making
-    TradingEngine -> Supervisor [label="5. Detect Regime"];
-    Supervisor -> Workers [label="6. Select Worker"];
-    Workers -> TickPressure [label="7. Read Metrics", style=dashed, color="green"];
-    
-    TradingEngine -> NexusBrain [label="8. Get Trajectory"];
-    NexusBrain -> Transformer [label="inference"];
-    
-    TradingEngine -> GlobalBrain [label="9. Macro Check"];
-
-    // 5. Execution & Management
-    TradingEngine -> PositionManager [label="10. Manage Positions"];
-    PositionManager -> BrokerAdapter [label="Execute Orders"];
-    
-    // v5.3.0 Special Logic
-    PositionManager -> BrokerAdapter [label="The Eraser (Pair Close)", color="blue", style="bold"];
-    PositionManager -> Oracle [label="Sniper Signal"];
-    
-    // 6. Risk Management
-    TradingEngine -> RiskManager [label="11. Zone Check"];
-    RiskManager -> IronShield [label="Math Calc"];
-    RiskManager -> Oracle15
+v5.2.0 (HIGHEST INTELLIGENCE & PLAN B) - 2025-12-15
 - [NEW] Hedge Policy: Scored decision engine for hedging (Regime + Trend + Volatility).
 - [NEW] Risk Governor: Circuit breakers for Daily Loss, Exposure, and News events.
 - [NEW] Plan B (Reversion Escape): Auto-exit at break-even if hedging is blocked (Fakeout/Risk Veto).

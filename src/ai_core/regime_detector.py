@@ -59,7 +59,7 @@ class RegimeDetector:
         self._regime_history = deque(maxlen=50)
         
         # Configuration
-        self.adx_trending_threshold = 25.0  # ADX > 25 = trending
+        self.adx_trending_threshold = 20.0  # [FIX] Lowered from 25.0 to catch grinding trends
         self.adx_ranging_threshold = 20.0  # ADX < 20 = ranging
         self.atr_volatile_ratio = 1.5  # ATR > 1.5x average = volatile
         self.atr_quiet_ratio = 0.7  # ATR < 0.7x average = quiet

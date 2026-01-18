@@ -91,18 +91,23 @@ class CorrelationMonitor:
         missing = []
         for sym in [self.usd_symbol, self.risk_symbol]:
             try:
-                ticks = mt5.copy_ticks_from(sym, datetime.now(), 10, mt5.COPY_TICKS_ALL)
-                if ticks is None or len(ticks) < 2:
+                # [FIX] Use time-based window (60s) instead of raw ticks to filter HFT noise
+                # Fetch last 2 M1 candles
+                candles = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_M1, 0, 2)
+                
+                if candles is None or len(candles) < 2:
+                     missing.append(sym)
+                     continue
+
+                current_close = float(candles[-1]['close'])
+                prev_close = float(candles[-2]['close']) # Close of previous minute
+                
+                if prev_close == 0:
                     missing.append(sym)
                     continue
 
-                current = ticks[-1][1]  # bid
-                prev = ticks[0][1]
-                if prev == 0:
-                    missing.append(sym)
-                    continue
-
-                velocity = ((current - prev) / prev) * 10000
+                # Calculate velocity based on 1-minute change
+                velocity = ((current_close - prev_close) / prev_close) * 10000
                 data[sym] = float(velocity)
             except Exception:
                 missing.append(sym)
